@@ -1,0 +1,50 @@
+[package]
+name = "desktop"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "tmls-rs desktop v0: native window with the tmls sidebar and tmux sessions in tabs"
+
+[lib]
+name = "desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tmls-rs"
+path = "src/main.rs"
+
+[dependencies]
+client-core = { path = "../client-core" }
+s2-core = { path = "../../spikes/s2-core" }
+s2-wgpu = { path = "../../spikes/s2-wgpu" }
+winit = "0.30"
+wgpu = "30"
+pollster = "1"
+anyhow = "1"
+# Reads tmls's notifications.json (the version client-core uses).
+serde_json = "1"
+# Same features as s2-wgpu: no image support, data-control for wlroots/KDE Wayland.
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+# Decodes the pictures the file panel shows (`viewer::decode`): these five formats and no others.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+
+[target.'cfg(windows)'.dependencies]
+# Image paste on Windows reads the clipboard's picture through arboard (`clip::windows_image`):
+# there is no wl-paste there.
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+
+[target.'cfg(unix)'.dependencies]
+# setsid() for the detached launch (`launch`); std has no stable setsid. Already in the tree via client-core.
+libc = "0.2"
+
+# Files dropped on the window (`dnd`): winit 0.30 has no drag and drop on Wayland. Both are in the
+# tree already, at these versions, through winit; `client_system` is what gives a `Backend` on
+# winit's own `wl_display`.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The drag source of the drop check (`examples/dragsrc.rs`) needs a window of its own: xdg-shell.
+# In the tree already through winit.
+wayland-protocols = { version = "0.32", features = ["client"] }

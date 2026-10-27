@@ -1,0 +1,440 @@
+//! Keeps the listing of every host fresh: one thread per host, so a host that hangs delays
+//! nobody else. Each thread runs the host's listing command with a timeout, hands the snapshot
+//! to the callback when it differs from the host's previous one in anything but the sessions'
+//! output ages (an online host going offline always does), then sleeps for the period or until
+//! [`Poller::refresh_host`] names it (or [`Poller::refresh_now`], which is for every host).
+//!
+//! A listing runs in a process group of its own and is read without blocking, so a timeout or
+//! a stopping poller kills the command and everything it started, and never waits on a pipe.
+
+use std::collections::HashMap;
+use std::io::{ErrorKind, Read, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use crate::config::Config;
+use crate::listing::{HostSnapshot, LISTING_SCRIPT, listing_command, parse_listing};
+
+/// Windows has no process groups like Unix's; this keeps the shared `.process_group(0)` builder
+/// one, doing nothing.
+#[cfg(windows)]
+trait ProcessGroupShim {
+    fn process_group(&mut self, group: i32) -> &mut Self;
+}
+
+#[cfg(windows)]
+impl ProcessGroupShim for Command {
+    fn process_group(&mut self, _group: i32) -> &mut Self {
+        self
+    }
+}
+
+/// `HostSnapshot::error` of a host whose ssh wants a password, a key or a host-key answer:
+/// the user has to sign in by hand.
+pub const SIGN_IN_REQUIRED: &str = "sign-in required";
+
+/// What ssh prints when it cannot sign in without asking (tmls: `hosts.list_host`).
+const SIGN_IN_PHRASES: [&str; 4] =
+    ["permission denied", "host key verification failed", "keyboard-interactive", "password + otp"];
+
+/// How often a running listing is checked for exit, timeout and stop.
+const TICK: Duration = Duration::from_millis(20);
+
+/// No listing is this long; a host that prints more is not read further.
+const MAX_OUTPUT: usize = 16 << 20;
+
+/// How often every host is listed unless `TMLS_RS_POLL_S` says otherwise.
+pub const DEFAULT_PERIOD: Duration = Duration::from_secs(5);
+
+/// The listing period from `TMLS_RS_POLL_S` (whole seconds, 1 to 3600); `DEFAULT_PERIOD` for
+/// anything else.
+pub fn period_from(value: Option<&str>) -> Duration {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| (1..=3600).contains(s))
+        .map_or(DEFAULT_PERIOD, Duration::from_secs)
+}
+
+/// Makes the listing command of a host; [`LISTING_SCRIPT`] goes to its stdin.
+pub type CommandFactory = Box<dyn Fn(&str) -> Command + Send + Sync>;
+
+pub struct Poller {
+    shared: Arc<Shared>,
+    threads: Vec<JoinHandle<()>>,
+}
+
+struct Shared {
+    state: Mutex<State>,
+    wake: Condvar,
+}
+
+struct State {
+    stop: bool,
+    /// Counts `refresh_now` calls: a thread that sees it move lists again.
+    refresh: u64,
+    /// Counts each host's `refresh_host` calls: its thread lists again when it sees its own move.
+    asked: HashMap<String, u64>,
+    /// Counts each host's force_next calls: its thread delivers its next listing when it sees its own move.
+    resend: HashMap<String, u64>,
+    /// Hosts listed at a period of their own (`slow_down`), instead of the poller's.
+    slow: HashMap<String, Duration>,
+}
+
+impl State {
+    /// What a thread compares to know that it is asked to list again: every host's count and
+    /// `host`'s own.
+    fn refreshes(&self, host: &str) -> (u64, u64) {
+        (self.refresh, self.asked.get(host).copied().unwrap_or(0))
+    }
+}
+
+impl Shared {
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Poller {
+    /// Lists every host of `cfg` now and then every `period`; a listing that takes longer than
+    /// `timeout` is killed and its host reported offline. `on_snapshot` runs on the polling
+    /// threads, one call at a time.
+    pub fn start(
+        cfg: &Config,
+        period: Duration,
+        timeout: Duration,
+        on_snapshot: Box<dyn Fn(HostSnapshot) + Send>,
+    ) -> Poller {
+        let local_name = cfg.local_name.clone();
+        let command = Box::new(move |host: &str| listing_command(host, &local_name));
+        Poller::start_with(&cfg.hosts, command, period, timeout, on_snapshot)
+    }
+
+    /// [`Poller::start`] with the hosts and their listing commands given (tests use fake hosts).
+    pub fn start_with(
+        hosts: &[String],
+        command: CommandFactory,
+        period: Duration,
+        timeout: Duration,
+        on_snapshot: Box<dyn Fn(HostSnapshot) + Send>,
+    ) -> Poller {
+        let state =
+            State { stop: false, refresh: 0, asked: HashMap::new(), resend: HashMap::new(), slow: HashMap::new() };
+        let shared = Arc::new(Shared { state: Mutex::new(state), wake: Condvar::new() });
+        let command = Arc::new(command);
+        let deliver = Arc::new(Mutex::new(on_snapshot));
+        let threads = hosts
+            .iter()
+            .map(|host| {
+                let (host, shared, command, deliver) = (host.clone(), shared.clone(), command.clone(), deliver.clone());
+                std::thread::Builder::new()
+                    .name(format!("tmls-poll-{host}"))
+                    .spawn(move || poll_host(&host, &shared, &**command, period, timeout, &deliver))
+                    .expect("spawning a polling thread")
+            })
+            .collect();
+        Poller { shared, threads }
+    }
+
+    /// Lists every host again without waiting for the period to end, the slowed ones
+    /// (`slow_down`) too: for a refresh the user asks for by hand, and nothing else.
+    pub fn refresh_now(&self) {
+        self.shared.state().refresh += 1;
+        self.shared.wake.notify_all();
+    }
+
+    /// Lists `host` again without waiting for its period to end, slowed or not, and no other
+    /// host: for what concerns that host alone (a request on it, one of its tabs, an event it
+    /// pushed). A host the poller does not list is nobody's.
+    pub fn refresh_host(&self, host: &str) {
+        *self.shared.state().asked.entry(host.to_string()).or_default() += 1;
+        self.shared.wake.notify_all();
+    }
+
+    /// The next listing of `host` is delivered even if it is the same as the last one: a
+    /// pushed event changed the app's copy, and the listing is the truth again (D3).
+    pub fn force_next(&self, host: &str) {
+        *self.shared.state().resend.entry(host.to_string()).or_default() += 1;
+    }
+
+    /// Lists `hosts` every `period` from now on instead of the poller's own period; `None`
+    /// gives them their own back. Takes effect at once both ways: a thread waiting out the old
+    /// period wakes and waits for the new one, counted from its last listing.
+    pub fn slow_down(&self, hosts: &[String], period: Option<Duration>) {
+        let mut state = self.shared.state();
+        for host in hosts {
+            match period {
+                Some(period) => {
+                    state.slow.insert(host.clone(), period);
+                }
+                None => {
+                    state.slow.remove(host);
+                }
+            }
+        }
+        drop(state);
+        self.shared.wake.notify_all();
+    }
+}
+
+impl Drop for Poller {
+    /// Stops and joins every thread; a listing still running is killed.
+    fn drop(&mut self) {
+        self.shared.state().stop = true;
+        self.shared.wake.notify_all();
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn poll_host(
+    host: &str,
+    shared: &Shared,
+    command: &(dyn Fn(&str) -> Command + Send + Sync),
+    period: Duration,
+    timeout: Duration,
+    deliver: &Mutex<Box<dyn Fn(HostSnapshot) + Send>>,
+) {
+    let mut last: Option<HostSnapshot> = None;
+    let mut resent = 0;
+    // Listings that failed in a row after one that answered.
+    let mut failures = 0u32;
+    loop {
+        let (refreshes, resend) = {
+            let state = shared.state();
+            (state.refreshes(host), state.resend.get(host).copied().unwrap_or(0))
+        };
+        let stopped = || shared.state().stop;
+        let Some(snapshot) = run(host, command(host), timeout, &stopped) else { return };
+        if stopped() {
+            return;
+        }
+        // Forced while this listing ran (a pushed event was applied meanwhile): this one is
+        // older than what the app shows and would undo it. Dropped; listed again at once.
+        if shared.state().resend.get(host).copied().unwrap_or(0) != resend {
+            continue;
+        }
+        if !snapshot.online && failures == 0 && last.as_ref().is_some_and(|last| last.online) {
+            // One failure after a listing that answered is a blip until a second one says
+            // otherwise: listed again at once, the rows as they were meanwhile.
+            failures = 1;
+            continue;
+        }
+        failures = if snapshot.online { 0 } else { failures + 1 };
+        // compared without the output ages: they grow at every listing of a host with sessions
+        let comparable = without_ages(&snapshot);
+        if last.as_ref() != Some(&comparable) || resend != resent {
+            (deliver.lock().unwrap_or_else(PoisonError::into_inner))(snapshot);
+            last = Some(comparable);
+            resent = resend;
+        }
+
+        // The period is read again at every wake: `slow_down` takes effect at once.
+        let listed_at = Instant::now();
+        let mut state = shared.state();
+        loop {
+            if state.stop {
+                return;
+            }
+            let period = state.slow.get(host).copied().unwrap_or(period);
+            let left = (listed_at + period).saturating_duration_since(Instant::now());
+            if state.refreshes(host) != refreshes || left.is_zero() {
+                break;
+            }
+            state = shared.wake.wait_timeout(state, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+    }
+}
+
+/// The snapshot with every `last_output_age_s` and `activity` blanked: what "the same as
+/// before" compares. Ages grow at every listing; activity moves with output, which reaches the
+/// app with the session's next status change (a shell that prints turns running).
+fn without_ages(snapshot: &HostSnapshot) -> HostSnapshot {
+    let mut snapshot = snapshot.clone();
+    for session in &mut snapshot.sessions {
+        session.last_output_age_s = None;
+        session.activity = None;
+    }
+    snapshot
+}
+
+/// Lists `host` once with `command` (see [`listing_command`]), on the calling thread. Any
+/// failure is an offline snapshot that says why: no answer within `timeout` (the command is
+/// killed), ssh could not connect or sign in, or what came back is not a listing.
+pub fn list_once(host: &str, command: Command, timeout: Duration) -> HostSnapshot {
+    run(host, command, timeout, &|| false).expect("never stopped")
+}
+
+fn offline(host: &str, error: String) -> HostSnapshot {
+    HostSnapshot { host: host.to_string(), online: false, error: Some(error), sessions: Vec::new() }
+}
+
+/// Runs one listing; `None` when `stopped` said so first.
+fn run(host: &str, mut command: Command, timeout: Duration, stopped: &dyn Fn() -> bool) -> Option<HostSnapshot> {
+    // a group of its own: killing it takes what the command started too (a local `sh` waiting on tmux)
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => return Some(offline(host, format!("cannot run {}: {e}", command.get_program().to_string_lossy()))),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        // far smaller than a pipe's buffer, so this cannot block; a command that exits without
+        // reading it is that command's failure, reported from its exit status below
+        let _ = stdin.write_all(LISTING_SCRIPT.as_bytes());
+    }
+    let mut stdout = Pipe::new(child.stdout.take());
+    let mut stderr = Pipe::new(child.stderr.take());
+    let give_up_at = Instant::now() + timeout;
+    let status = loop {
+        stdout.read_available();
+        stderr.read_available();
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                kill_group(&mut child);
+                return Some(offline(host, format!("cannot wait for the listing: {e}")));
+            }
+        }
+        if stopped() {
+            kill_group(&mut child);
+            return None;
+        }
+        if Instant::now() >= give_up_at {
+            kill_group(&mut child);
+            return Some(offline(host, format!("no answer in {:.0} s", timeout.as_secs_f64())));
+        }
+        wait_readable(&stdout, &stderr);
+    };
+    // what it wrote before exiting; anything it left running may keep the pipes open, so no wait for EOF
+    stdout.read_available();
+    stderr.read_available();
+    Some(snapshot(host, status, &stdout.data, &stderr.data))
+}
+
+fn snapshot(host: &str, status: ExitStatus, stdout: &[u8], stderr: &[u8]) -> HostSnapshot {
+    if status.success() {
+        return parse_listing(host, &String::from_utf8_lossy(stdout));
+    }
+    // the script itself always succeeds: this is ssh failing, or a connection lost mid-listing
+    let stderr = String::from_utf8_lossy(stderr);
+    let lower = stderr.to_lowercase();
+    if SIGN_IN_PHRASES.iter().any(|phrase| lower.contains(phrase)) {
+        return offline(host, SIGN_IN_REQUIRED.to_string());
+    }
+    let last_line = stderr.lines().map(str::trim).rfind(|line| !line.is_empty());
+    offline(host, last_line.map_or_else(|| status.to_string(), str::to_string))
+}
+
+/// SIGKILL to the listing's whole process group, then reaps the command.
+#[cfg(unix)]
+fn kill_group(child: &mut Child) {
+    // SAFETY: plain syscall. The child is not reaped yet, so its pid (the group's id, from
+    // `process_group(0)`) still names this group and nothing else.
+    unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The same on Windows: the listing is just `ssh.exe`, so killing it is enough.
+#[cfg(windows)]
+fn kill_group(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// One of the child's output pipes, read without blocking.
+#[cfg(unix)]
+struct Pipe<R> {
+    source: Option<R>,
+    data: Vec<u8>,
+}
+
+#[cfg(unix)]
+impl<R: Read + AsRawFd> Pipe<R> {
+    fn new(source: Option<R>) -> Pipe<R> {
+        if let Some(source) = &source {
+            let fd = source.as_raw_fd();
+            // SAFETY: fcntl on a descriptor this process owns. The flag is on the read end only.
+            unsafe { libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK) };
+        }
+        Pipe { source, data: Vec::new() }
+    }
+
+    /// Takes what is in the pipe now; closes it at end of file.
+    fn read_available(&mut self) {
+        let mut buf = [0u8; 8192];
+        while let Some(source) = &mut self.source {
+            match source.read(&mut buf) {
+                Ok(0) => self.source = None,
+                Ok(n) if self.data.len() < MAX_OUTPUT => self.data.extend_from_slice(&buf[..n]),
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(_) => self.source = None,
+            }
+        }
+    }
+}
+
+/// Sleeps one [`TICK`], less when a pipe has something to read.
+#[cfg(unix)]
+fn wait_readable<A: AsRawFd, B: AsRawFd>(a: &Pipe<A>, b: &Pipe<B>) {
+    let open = [a.source.as_ref().map(AsRawFd::as_raw_fd), b.source.as_ref().map(AsRawFd::as_raw_fd)];
+    let mut fds: Vec<libc::pollfd> =
+        open.into_iter().flatten().map(|fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }).collect();
+    // SAFETY: `fds` is a valid array of `fds.len()` pollfd for the length of the call.
+    unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, TICK.as_millis() as libc::c_int) };
+}
+
+/// The same on Windows, where a pipe cannot be set non-blocking: a thread of its own reads it
+/// into a buffer `read_available` takes from.
+#[cfg(windows)]
+struct Pipe<R> {
+    data: Vec<u8>,
+    shared: Arc<Mutex<Vec<u8>>>,
+    source: std::marker::PhantomData<R>,
+}
+
+#[cfg(windows)]
+impl<R: Read + Send + 'static> Pipe<R> {
+    fn new(source: Option<R>) -> Pipe<R> {
+        let shared = Arc::new(Mutex::new(Vec::new()));
+        if let Some(mut source) = source {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match source.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => shared.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(&buf[..n]),
+                        Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+        Pipe { data: Vec::new(), shared, source: std::marker::PhantomData }
+    }
+
+    /// Takes whatever the reading thread has put in the buffer so far.
+    fn read_available(&mut self) {
+        let mut shared = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let take = shared.len().min(MAX_OUTPUT.saturating_sub(self.data.len()));
+        self.data.extend_from_slice(&shared[..take]);
+        shared.drain(..take);
+    }
+}
+
+/// Sleeps one [`TICK`]: Windows pipes cannot be polled, so the reading thread is picked up on the
+/// next turn of [`run`]'s loop.
+#[cfg(windows)]
+fn wait_readable<A: Read + Send + 'static, B: Read + Send + 'static>(_a: &Pipe<A>, _b: &Pipe<B>) {
+    std::thread::sleep(TICK);
+}

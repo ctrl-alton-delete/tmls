@@ -1,0 +1,604 @@
+//! Alerts: which sessions started to need the user, the bell's count, the list behind it and
+//! the desktop notification (tmls README "Alerts", `app.py` `_alert`, `notifications.py`).
+//! No window and no process here: `observe` says what to notify, the app runs the command.
+//!
+//! **What alerts.** A session whose mark *changes to* `?` (waiting), `◆` (finished unwatched)
+//! or `✕` (error) at a listing of its host. As in tmls, a session that was not known before
+//! is not news: nothing alerts at the first listing after the start or for a session that
+//! appears already waiting. A listing of a host that did not answer changes nothing here
+//! (unlike tmls): what its sessions did meanwhile alerts when the host is back, as the list
+//! then shows it (`Seen` forgets nothing for an offline host either).
+//!
+//! **Silence focused** (on by default): no alert for the session of the tab in front while
+//! the window has the keyboard focus — the user is looking at it. With the window *not*
+//! focused that session does alert; the list never gives it a `◆` (`Sidebar::deliver` counts
+//! the tab in front as watched), so its going from working to idle is taken as `◆` here.
+//!
+//! **Settings** are tmls's `~/.config/tmls/notifications.json`: `desktop` (default on), `sound`
+//! (default off: `canberra-gtk-play`, when it is installed) and `silence_focused` (default on).
+//! A missing or damaged file, or a value that is not a boolean, is the default. The three
+//! switches head the alerts list; Space flips one, and the file is written then (`switch`):
+//! read again first, so only that switch changes in it (tmls may have written it since the
+//! start), with tmls's three keys as tmls writes them and every other key it had kept. A file
+//! that is there but cannot be read, or is not a JSON object, is never written over: the flip
+//! is refused.
+//!
+//! **Approvals** (tmls's Yes / No on a permission prompt): `y` on an alert asks the app to
+//! answer its session's prompt (`PanelResult::Approve`); nothing here sends a key to a session.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use client_core::{SessionInfo, SessionKey, Status};
+use s2_core::{Key, KeyEvent, Named};
+
+use crate::forms::{Look, Panel, Target};
+
+/// How many alerts are kept (tmls `KEEP_ALERTS`).
+pub const MAX_ALERTS: usize = 50;
+/// The alerts panel: its width (tmls: 60) and how many alerts it shows at once.
+const PANEL_COLS: usize = 60;
+const PANEL_ROWS: usize = 12;
+
+/// tmls's alert switches (`notifications.py`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Settings {
+    /// Desktop notifications through `notify-send`.
+    pub desktop: bool,
+    /// A sound through `canberra-gtk-play` with every alert that notifies.
+    pub sound: bool,
+    /// No alert for the session the user is looking at.
+    pub silence_focused: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Settings {
+        Settings {
+            desktop: true,
+            sound: false,
+            silence_focused: true,
+        }
+    }
+}
+
+impl Settings {
+    /// Reads `notifications.json` in `config_dir`. Never fails, never writes.
+    pub fn load(config_dir: &Path) -> Settings {
+        std::fs::read_to_string(config_dir.join("notifications.json"))
+            .map_or_else(|_| Settings::default(), |text| Settings::parse(&text))
+    }
+
+    /// The settings a `notifications.json` with this text gives.
+    pub fn parse(text: &str) -> Settings {
+        match serde_json::from_str(text) {
+            Ok(serde_json::Value::Object(object)) => Settings::of(&object),
+            _ => Settings::default(),
+        }
+    }
+
+    /// The settings in the file's object: each key that is a boolean, else its default.
+    fn of(object: &Object) -> Settings {
+        let defaults = Settings::default();
+        let switch = |name: &str, default: bool| {
+            object
+                .get(name)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(default)
+        };
+        Settings {
+            desktop: switch(KEYS[0], defaults.desktop),
+            sound: switch(KEYS[1], defaults.sound),
+            silence_focused: switch(KEYS[2], defaults.silence_focused),
+        }
+    }
+
+    /// What `notifications.json` in `config_dir` holds now, for a flip: its object, `None`
+    /// when there is no file (the defaults; the flip makes it), or why it cannot be changed —
+    /// it is there but cannot be read, or is not a JSON object. Never writes.
+    pub fn stored(config_dir: &Path) -> Result<Option<Object>, String> {
+        let text = match std::fs::read_to_string(config_dir.join(FILE)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("cannot be read: {e}")),
+        };
+        match serde_json::from_str(&text) {
+            Ok(serde_json::Value::Object(object)) => Ok(Some(object)),
+            _ => Err("is not a JSON object".to_string()),
+        }
+    }
+
+    /// Writes `notifications.json` in `config_dir`: tmls's three keys as tmls writes them
+    /// (`json.dumps(asdict(…))`), then every other key of `kept`, the object the file had,
+    /// so nothing tmls-rs does not know is dropped. Written as `pins` is
+    /// (`config::replace_file`): a reader sees the old switches or the new ones, a link stays
+    /// a link, and a write that fails leaves the old file and no temp file.
+    pub fn save(&self, config_dir: &Path, kept: &Object) -> std::io::Result<()> {
+        std::fs::create_dir_all(config_dir)?;
+        let mut entries = vec![
+            format!("\"{}\": {}", KEYS[0], self.desktop),
+            format!("\"{}\": {}", KEYS[1], self.sound),
+            format!("\"{}\": {}", KEYS[2], self.silence_focused),
+        ];
+        for (key, value) in kept.iter().filter(|(key, _)| !KEYS.contains(&key.as_str())) {
+            entries.push(format!(
+                "{}: {value}",
+                serde_json::Value::from(key.as_str())
+            ));
+        }
+        let text = format!("{{{}}}\n", entries.join(", "));
+        client_core::config::replace_file(&config_dir.join(FILE), &text)
+    }
+}
+
+/// tmls's settings file in `~/.config/tmls`.
+const FILE: &str = "notifications.json";
+
+/// Its keys, in the order tmls writes them: [`Settings`]' three switches.
+const KEYS: [&str; SWITCHES] = ["desktop", "sound", "silence_focused"];
+
+/// A JSON object: what `notifications.json` holds.
+pub type Object = serde_json::Map<String, serde_json::Value>;
+
+/// One line of the alerts list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Alert {
+    pub key: SessionKey,
+    /// `Waiting`, `Unseen` or `Error`.
+    pub status: Status,
+    /// What a waiting session waits for, when the listing says.
+    pub reason: Option<String>,
+    pub at: Instant,
+}
+
+impl Alert {
+    /// What happened, in a word or the session's own: tmls `ALERT_TEXT`.
+    fn detail(&self) -> &str {
+        match (self.status, self.reason.as_deref()) {
+            (Status::Waiting, Some(reason)) if !reason.is_empty() => reason,
+            (Status::Waiting, _) => "waiting",
+            (Status::Error, _) => "error",
+            _ => "done",
+        }
+    }
+}
+
+/// A desktop notification to send.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notification {
+    pub title: String,
+    pub body: String,
+}
+
+/// The command that shows `note`: no shell, title and body one argument each. After `--`
+/// neither can be read as an option, whatever a session or a host is called.
+pub fn notify_argv(note: &Notification) -> Vec<String> {
+    ["notify-send", "--", &note.title, &note.body]
+        .map(str::to_string)
+        .to_vec()
+}
+
+/// Sends `notes` through `spawn` (the app: `forms::spawn_detached`). A machine without
+/// `notify-send`, or one where it cannot start, shows none: that is not an error to report
+/// with every alert.
+pub fn send(notes: &[Notification], spawn: &mut dyn FnMut(&[String]) -> std::io::Result<()>) {
+    for note in notes {
+        let _ = spawn(&notify_argv(note));
+    }
+}
+
+/// The program that plays the alert sound (R6); without it there is none.
+pub const SOUND_PLAYER: &str = "canberra-gtk-play";
+
+/// The sound tmls plays with an alert (`notifications.emit`).
+pub fn sound_argv() -> Vec<String> {
+    [SOUND_PLAYER, "-i", "message-new-instant", "-d", "tmls"]
+        .map(str::to_string)
+        .to_vec()
+}
+
+/// What `settings` ask for each note: the notification when `desktop`, the sound when `sound`
+/// and `player` (`canberra-gtk-play` is on PATH). Nothing that cannot start is an error.
+pub fn emit(
+    notes: &[Notification],
+    settings: Settings,
+    player: bool,
+    spawn: &mut dyn FnMut(&[String]) -> std::io::Result<()>,
+) {
+    for note in notes {
+        if settings.desktop {
+            let _ = spawn(&notify_argv(note));
+        }
+        if settings.sound && player {
+            let _ = spawn(&sound_argv());
+        }
+    }
+}
+
+/// How many switches head the alerts list: Desktop, Sound, Silence focused.
+pub const SWITCHES: usize = 3;
+
+/// The switches as the list shows them, in order.
+fn switch_rows(settings: Settings) -> [(&'static str, bool); SWITCHES] {
+    [
+        ("Desktop", settings.desktop),
+        ("Sound", settings.sound),
+        ("Silence focused", settings.silence_focused),
+    ]
+}
+
+/// `settings` with switch `index` flipped.
+fn flipped(settings: Settings, index: usize) -> Settings {
+    match index {
+        0 => Settings {
+            desktop: !settings.desktop,
+            ..settings
+        },
+        1 => Settings {
+            sound: !settings.sound,
+            ..settings
+        },
+        _ => Settings {
+            silence_focused: !settings.silence_focused,
+            ..settings
+        },
+    }
+}
+
+/// From `current` to `wanted`, in `notifications.json` in `config_dir` (the app:
+/// `~/.config/tmls`). The file is read again first and only the switches that differ between
+/// the two change in it: what tmls wrote there since the start stays. Returns the settings to
+/// use from now on (the file's, with the flip) and the status line. A switch that cannot be
+/// saved stays as it was, and so does one whose file cannot be understood (`Settings::stored`),
+/// which is left untouched; Sound turned on without a `player` is on all the same, and says
+/// there will be no sound.
+pub fn switch(
+    current: Settings,
+    wanted: Settings,
+    config_dir: &Path,
+    player: bool,
+) -> (Settings, Result<String, String>) {
+    let kept = match Settings::stored(config_dir) {
+        Ok(kept) => kept.unwrap_or_default(),
+        Err(why) => {
+            let said = format!("couldn't switch: {FILE} {why}; it is left as it is");
+            return (current, Err(said));
+        }
+    };
+    let stored = Settings::of(&kept);
+    let flip = |was: bool, wants: bool, has: bool| if was != wants { wants } else { has };
+    let now = Settings {
+        desktop: flip(current.desktop, wanted.desktop, stored.desktop),
+        sound: flip(current.sound, wanted.sound, stored.sound),
+        silence_focused: flip(
+            current.silence_focused,
+            wanted.silence_focused,
+            stored.silence_focused,
+        ),
+    };
+    if let Err(e) = now.save(config_dir, &kept) {
+        return (
+            current,
+            Err(format!("couldn't save the alert switches: {e}")),
+        );
+    }
+    let changed: Vec<String> = switch_rows(current)
+        .into_iter()
+        .zip(switch_rows(wanted))
+        .filter(|((_, was), (_, now))| was != now)
+        .map(|(_, (name, now))| format!("{name} {}", if now { "ON" } else { "OFF" }))
+        .collect();
+    let mut said = changed.join(", ");
+    if wanted.sound && !current.sound && !player {
+        said = format!("{said}, but {SOUND_PLAYER} is not installed: no sound");
+    }
+    (now, Ok(said))
+}
+
+/// Who is looking at what, when a listing arrives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Watching<'a> {
+    /// The session of the tab in front.
+    pub front: Option<&'a SessionKey>,
+    /// The window has the keyboard focus.
+    pub window_focused: bool,
+}
+
+/// The alerts so far, newest first, and how many are new since the list was last opened.
+#[derive(Debug, Default)]
+pub struct Alerts {
+    settings: Settings,
+    entries: Vec<Alert>,
+    unread: usize,
+    /// Each listed session's mark at its host's last listing.
+    marks: HashMap<SessionKey, Status>,
+}
+
+impl Alerts {
+    pub fn new(settings: Settings) -> Alerts {
+        Alerts {
+            settings,
+            ..Alerts::default()
+        }
+    }
+
+    /// A host's new listing: `listed` are its sessions as the list shows them now (after
+    /// `Seen` marked the unseen ones). Adds an alert for every session that started to need
+    /// the user, and returns the notifications to send. A listing of a host that did not
+    /// answer (`online` false) says nothing about its sessions: their marks are kept, so what
+    /// changed while it was away alerts at its next listing. A session that is not in an
+    /// online listing is forgotten.
+    pub fn observe<'a>(
+        &mut self,
+        host: &str,
+        online: bool,
+        listed: impl IntoIterator<Item = &'a SessionInfo>,
+        watching: Watching,
+        now: Instant,
+    ) -> Vec<Notification> {
+        if !online {
+            return Vec::new();
+        }
+        let mut before = HashMap::new();
+        self.marks.retain(|key, status| {
+            let of_host = key.host == host;
+            if of_host {
+                before.insert(key.clone(), *status);
+            }
+            !of_host
+        });
+        let mut notes = Vec::new();
+        for info in listed {
+            let old = before.get(&info.key).copied();
+            self.marks.insert(info.key.clone(), info.status);
+            let front = watching.front == Some(&info.key);
+            let watched = front && watching.window_focused;
+            // The tab in front never gets a ◆ in the list; unwatched, it finished all the same.
+            let finished = matches!(old, Some(Status::Running | Status::Waiting));
+            let status = match info.status {
+                Status::Idle if front && !watched && finished => Status::Unseen,
+                status => status,
+            };
+            let needs_user = matches!(status, Status::Waiting | Status::Unseen | Status::Error);
+            // Unknown before: not news.
+            let news = needs_user && old.is_some_and(|old| old != status);
+            if !news || (watched && self.settings.silence_focused) {
+                continue;
+            }
+            let alert = Alert {
+                key: info.key.clone(),
+                status,
+                reason: info.reason.clone().filter(|_| status == Status::Waiting),
+                at: now,
+            };
+            if (self.settings.desktop || self.settings.sound) && status != Status::Error {
+                notes.push(Notification {
+                    title: format!("tmls · {}", alert.key.host),
+                    body: format!("{} {} · {}", status.mark(), alert.key.name, alert.detail()),
+                });
+            }
+            self.entries.insert(0, alert);
+            self.entries.truncate(MAX_ALERTS);
+            self.unread = (self.unread + 1).min(MAX_ALERTS);
+        }
+        notes
+    }
+
+    /// The alerts, newest first.
+    pub fn entries(&self) -> &[Alert] {
+        &self.entries
+    }
+
+    /// How many alerts came since the list was last opened.
+    pub fn unread(&self) -> usize {
+        self.unread
+    }
+
+    /// The switches in use.
+    pub fn settings(&self) -> Settings {
+        self.settings
+    }
+
+    /// The switches to use from now on (`switch`).
+    pub fn set_settings(&mut self, settings: Settings) {
+        self.settings = settings;
+    }
+
+    /// Opens the list as it is now, the cursor on the newest alert, or on the first switch
+    /// when there is none; every alert in it counts as read.
+    pub fn open(&mut self, now: Instant) -> AlertsPanel {
+        self.unread = 0;
+        AlertsPanel {
+            entries: self.entries.clone(),
+            settings: self.settings,
+            now,
+            cursor: if self.entries.is_empty() { 0 } else { SWITCHES },
+        }
+    }
+}
+
+/// What a key or a click did to the alerts panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PanelResult {
+    Pending,
+    Closed,
+    /// Go to this alert's session.
+    Jump(SessionKey),
+    /// Answer this alert's session's permission prompt.
+    Approve(SessionKey),
+    /// A switch was flipped: these are the settings now.
+    Settings(Settings),
+}
+
+/// What a jump to an alert's session does: opens its tab, or says in the status line why
+/// not — its host does not answer now, or the session was renamed or killed since. `listed`:
+/// the list has the session now; `has_tab`: a tab of it is open (ended, perhaps);
+/// `host_online`: the host answered its last listing.
+pub fn jump(
+    key: &SessionKey,
+    listed: bool,
+    has_tab: bool,
+    host_online: bool,
+) -> Result<(), String> {
+    if listed || has_tab {
+        Ok(())
+    } else if !host_online {
+        Err(format!("{} is offline", key.host))
+    } else {
+        Err(format!(
+            "{} on {} is gone (renamed or ended)",
+            key.name, key.host
+        ))
+    }
+}
+
+/// The open list of alerts, as it was when it was opened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlertsPanel {
+    entries: Vec<Alert>,
+    settings: Settings,
+    now: Instant,
+    /// The row the arrows or the pointer are on: `0..SWITCHES` the switches, then the alerts.
+    cursor: usize,
+}
+
+/// How long ago, in at most three columns: `now`, `5m`, `3h`, `2d`.
+fn age(age: Duration) -> String {
+    match age.as_secs() {
+        0..60 => "now".to_string(),
+        secs @ 60..3600 => format!("{}m", secs / 60),
+        secs @ 3600..86_400 => format!("{}h", secs / 3600),
+        secs => format!("{}d", (secs / 86_400).min(99)),
+    }
+}
+
+impl AlertsPanel {
+    /// The alert the cursor is on; `None` on a switch.
+    pub fn selected(&self) -> Option<&Alert> {
+        self.entries.get(self.cursor.checked_sub(SWITCHES)?)
+    }
+
+    /// The switches it shows, after a flip that could not be saved was undone.
+    pub fn set_settings(&mut self, settings: Settings) {
+        self.settings = settings;
+    }
+
+    /// Flips the switch under the cursor.
+    fn flip(&mut self, index: usize) -> PanelResult {
+        self.settings = flipped(self.settings, index);
+        PanelResult::Settings(self.settings)
+    }
+
+    /// Up / Down or k / j move over the switches and the alerts, Enter jumps to an alert's
+    /// session, y answers its prompt, Space flips a switch, Esc closes; nothing else does
+    /// anything.
+    pub fn key(&mut self, ev: &KeyEvent) -> PanelResult {
+        if !ev.pressed {
+            return PanelResult::Pending;
+        }
+        // With no alert the last row is the last switch.
+        let last = (SWITCHES + self.entries.len()).saturating_sub(1);
+        match ev.key {
+            Key::Named(Named::Up) | Key::Char('k') => self.cursor = self.cursor.saturating_sub(1),
+            Key::Named(Named::Down) | Key::Char('j') => self.cursor = (self.cursor + 1).min(last),
+            Key::Named(Named::Enter) if !ev.repeat => {
+                return self.selected().map_or(PanelResult::Pending, |alert| {
+                    PanelResult::Jump(alert.key.clone())
+                });
+            }
+            Key::Char('y') if !ev.repeat => {
+                return self.selected().map_or(PanelResult::Pending, |alert| {
+                    PanelResult::Approve(alert.key.clone())
+                });
+            }
+            Key::Char(' ') if !ev.repeat && self.cursor < SWITCHES => {
+                return self.flip(self.cursor);
+            }
+            Key::Named(Named::Escape) => return PanelResult::Closed,
+            _ => {}
+        }
+        PanelResult::Pending
+    }
+
+    /// The row under a position: a switch's index, or `SWITCHES` + an alert's.
+    fn row_at(&self, x: f32, y: f32) -> Option<usize> {
+        match self.panel().target_at(x, y) {
+            Some((Target::Switch(index), _)) => Some(index),
+            Some((Target::Item(index), _)) => Some(SWITCHES + index),
+            _ => None,
+        }
+    }
+
+    /// The pointer moved to `(x, y)` cells from the panel's corner. Returns whether the
+    /// cursor moved.
+    pub fn hover(&mut self, x: f32, y: f32) -> bool {
+        let Some(row) = self.row_at(x, y) else {
+            return false;
+        };
+        let changed = self.cursor != row;
+        self.cursor = row;
+        changed
+    }
+
+    /// A click at `(x, y)` cells from the panel's corner: flips a switch, jumps to an alert's
+    /// session, closes beside the panel.
+    pub fn click(&mut self, x: f32, y: f32) -> PanelResult {
+        match self.row_at(x, y) {
+            Some(row) if row < SWITCHES => {
+                self.cursor = row;
+                self.flip(row)
+            }
+            Some(row) => PanelResult::Jump(self.entries[row - SWITCHES].key.clone()),
+            None if self.panel().contains(x, y) => PanelResult::Pending,
+            None => PanelResult::Closed,
+        }
+    }
+
+    /// The first alert shown: the view follows the cursor.
+    fn first(&self) -> usize {
+        (self.cursor.saturating_sub(SWITCHES) + 1).saturating_sub(PANEL_ROWS)
+    }
+
+    /// The panel as text in cells: a title, the three switches, then one line per alert — how
+    /// long ago, the mark, the session, its host and what happened.
+    pub fn panel(&self) -> Panel {
+        let mut p = Panel::new(PANEL_COLS);
+        let title = "Alerts · Enter jumps · Space switches · Esc closes";
+        p.put(0, 1, PANEL_COLS - 2, title, Look::Title);
+        for (index, (name, on)) in switch_rows(self.settings).into_iter().enumerate() {
+            let look = Look::Item {
+                hovered: index == self.cursor,
+                danger: false,
+            };
+            let text = format!(" {name} {}", if on { "ON" } else { "OFF" });
+            p.put(1 + index, 0, PANEL_COLS, &text, look).target = Some(Target::Switch(index));
+        }
+        let top = 1 + SWITCHES;
+        if self.entries.is_empty() {
+            p.put(top, 1, PANEL_COLS - 2, "nothing yet", Look::Dim);
+        }
+        let shown = self
+            .entries
+            .iter()
+            .enumerate()
+            .skip(self.first())
+            .take(PANEL_ROWS);
+        for (line, (index, alert)) in shown.enumerate() {
+            let look = Look::Item {
+                hovered: SWITCHES + index == self.cursor,
+                danger: alert.status == Status::Error,
+            };
+            let text = format!(
+                " {:>3}  {} {} · {}  {}",
+                age(self.now.saturating_duration_since(alert.at)),
+                alert.status.mark(),
+                alert.key.name,
+                alert.key.host,
+                alert.detail(),
+            );
+            p.put(top + line, 0, PANEL_COLS, &text, look).target = Some(Target::Item(index));
+        }
+        p.lines = top + self.entries.len().clamp(1, PANEL_ROWS);
+        p
+    }
+}

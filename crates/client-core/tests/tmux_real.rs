@@ -1,0 +1,375 @@
+//! The builders against a real tmux, on this machine.
+//!
+//! Never the user's tmux server: before anything else each test points this process at a
+//! private one (`TMUX_TMPDIR` = a fresh directory under cargo's target tmp dir, `TMUX` removed),
+//! and every tmux process the tests start inherits that: the ones behind `tmux::run` and the
+//! attach child on the PTY alike. Every tmux command first asserts the private directory is in
+//! effect. Every session is named `tmlsrs-test-…` and a drop guard kills the ones its test made,
+//! and nothing else; the private server exits by itself with its last session.
+//!
+//! Every wait has a timeout that fails the test.
+
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
+
+use client_core::files::{Kind, locate_argv, parse_located};
+use client_core::listing::{SessionKey, parse_background};
+use client_core::tmux::{
+    NewSession, Start, attach_argv, kill_argv, kill_pane_argv, new_session_argv, pane_info_argv, parse_kill_pane,
+    rename_argv, run, server_sockets_argv, valid_session_name,
+};
+use s2_core::pty::Pty;
+
+const PREFIX: &str = "tmlsrs-test-";
+
+/// This machine's name in every test.
+const LOCAL: &str = "here";
+
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One private server for the three tests, so they run one at a time: the server exits with
+/// its last session, and a test must not start one while another's is going down.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+static PRIVATE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Whether tmux, started from this process now, can only reach the private server.
+fn private_in_effect() -> bool {
+    let Some(dir) = PRIVATE_DIR.get() else { return false };
+    dir.starts_with(env!("CARGO_TARGET_TMPDIR"))
+        && dir.is_dir()
+        && std::env::var_os("TMUX").is_none()
+        && std::env::var_os("TMUX_TMPDIR").as_deref() == Some(dir.as_os_str())
+}
+
+/// Call first in every test. Points the process at the private server and returns its
+/// directory; holds the other tests off until the guard is dropped.
+fn private_server() -> (MutexGuard<'static, ()>, &'static Path) {
+    let alone = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = PRIVATE_DIR.get_or_init(|| {
+        // short: a socket path holds about a hundred bytes
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("tmx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the private tmux directory");
+        // SAFETY: the environment is changed once, here, under ONE_AT_A_TIME, before this
+        // binary starts any process or thread of its own; the other test threads wait on that
+        // lock at their first statement and do not read the environment.
+        unsafe {
+            std::env::set_var("TMUX_TMPDIR", &dir);
+            std::env::remove_var("TMUX");
+        }
+        dir
+    });
+    assert!(private_in_effect(), "the private tmux directory {dir:?} is not in effect");
+    (alone, dir)
+}
+
+/// Runs a command that reaches tmux; only against the private server.
+fn go(argv: &[String]) -> anyhow::Result<String> {
+    assert!(private_in_effect(), "no tmux command without the private server");
+    run(argv, TIMEOUT)
+}
+
+fn tmux(args: &[&str]) -> anyhow::Result<String> {
+    let mut argv = vec!["tmux".to_string()];
+    argv.extend(args.iter().map(|a| a.to_string()));
+    go(&argv)
+}
+
+fn key(name: &str) -> SessionKey {
+    SessionKey { host: LOCAL.to_string(), name: name.to_string() }
+}
+
+/// The sessions a test made (or tried to); killed when it ends, however it ends.
+struct Created(Vec<String>);
+
+impl Created {
+    fn name(&mut self, name: &str) -> String {
+        assert!(name.starts_with(PREFIX), "{name:?} is not a test session name");
+        self.0.push(name.to_string());
+        name.to_string()
+    }
+}
+
+impl Drop for Created {
+    fn drop(&mut self) {
+        for name in &self.0 {
+            if private_in_effect() && name.starts_with(PREFIX) {
+                let _ = run(&kill_argv(&key(name), LOCAL), TIMEOUT); // already gone is fine
+            }
+        }
+    }
+}
+
+fn shell_in(folder: &Path, name: &str) -> NewSession {
+    NewSession {
+        host: LOCAL.to_string(),
+        folder: folder.to_str().expect("a utf-8 path").to_string(),
+        name: name.to_string(),
+        start: Start::Shell,
+        size: None,
+    }
+}
+
+/// The private server's session names; none when it is not running.
+fn sessions() -> Vec<String> {
+    tmux(&["list-sessions", "-F", "#{session_name}"]).map(|out| out.lines().map(str::to_string).collect()).unwrap_or_default()
+}
+
+fn only(name: &str) -> Vec<String> {
+    vec![name.to_string()]
+}
+
+/// A tmux format of the session's active pane.
+fn show(name: &str, format: &str) -> String {
+    tmux(&["display-message", "-p", "-t", &format!("={name}:"), format]).expect("display-message").trim_end().to_string()
+}
+
+/// Fails the test unless `done` comes true within [`TIMEOUT`].
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + TIMEOUT;
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn assert_on_private_socket(name: &str, dir: &Path) {
+    let socket = show(name, "#{socket_path}");
+    assert!(Path::new(&socket).starts_with(dir), "{name} lives on {socket}, not under {dir:?}");
+}
+
+#[test]
+fn create_list_rename_kill_round_trip() {
+    let (_alone, dir) = private_server();
+    let mut created = Created(Vec::new());
+    let name = created.name("tmlsrs-test-a b'c");
+    let renamed = created.name("tmlsrs-test-re \"named\" $HOME;x");
+    let longer = created.name("tmlsrs-test-a b'c and more");
+    for each in [&name, &renamed, &longer] {
+        assert_eq!(valid_session_name(each), Ok(()));
+    }
+
+    let mut request = shell_in(dir, &name);
+    request.size = Some((100, 30));
+    go(&new_session_argv(&request, LOCAL)).expect("creating the session");
+    assert_on_private_socket(&name, dir);
+    assert_eq!(sessions(), only(&name));
+    assert_eq!(show(&name, "#{window_width}"), "100", "the session starts at the size asked for");
+
+    let again = go(&new_session_argv(&request, LOCAL)).expect_err("the name is taken");
+    assert_eq!(again.to_string(), format!("a session named {name} already exists"));
+
+    // "=NAME" is that session and no other: the shorter name must not reach the longer one
+    go(&new_session_argv(&shell_in(dir, &longer), LOCAL)).expect("creating the second session");
+    go(&kill_argv(&key(&name), LOCAL)).expect("killing by the exact name");
+    assert_eq!(sessions(), only(&longer));
+    go(&kill_argv(&key(&name), LOCAL)).expect_err("a prefix of a name is not that session");
+    go(&rename_argv(&key(&name), &renamed, LOCAL)).expect_err("nor for a rename");
+    assert_eq!(sessions(), only(&longer));
+
+    go(&rename_argv(&key(&longer), &renamed, LOCAL)).expect("renaming");
+    assert_eq!(sessions(), only(&renamed));
+    go(&rename_argv(&key(&renamed), &name, LOCAL)).expect("renaming back to the quoted name");
+    assert_eq!(sessions(), only(&name));
+
+    go(&kill_argv(&key(&name), LOCAL)).expect("killing");
+    assert_eq!(sessions(), Vec::<String>::new());
+}
+
+#[test]
+fn new_session_starts_in_the_folder() {
+    let (_alone, dir) = private_server();
+    let mut created = Created(Vec::new());
+    let folder = dir.join("start here, it's $HOME");
+    std::fs::create_dir_all(&folder).unwrap();
+    let folder = folder.canonicalize().unwrap();
+
+    let name = created.name("tmlsrs-test-folder");
+    go(&new_session_argv(&shell_in(&folder, &name), LOCAL)).expect("creating the session");
+    assert_on_private_socket(&name, dir);
+    wait_until("the session's shell to be in the folder", || Path::new(&show(&name, "#{pane_current_path}")) == folder);
+
+    let missing = created.name("tmlsrs-test-missing");
+    let nowhere = folder.join("no such folder");
+    let error = go(&new_session_argv(&shell_in(&nowhere, &missing), LOCAL)).expect_err("the folder is not there");
+    assert_eq!(error.to_string(), format!("no such folder: {}", nowhere.display()));
+    assert_eq!(sessions(), only(&name), "and no session was made");
+
+    // a preset is typed into the session's own shell, in the folder
+    let preset = created.name("tmlsrs-test-preset");
+    let mut request = shell_in(&folder, &preset);
+    request.start = Start::Preset(["printf", "tmlsrs-%s-ok\\n", "42"].map(str::to_string).to_vec());
+    go(&new_session_argv(&request, LOCAL)).expect("creating the preset session");
+    wait_until("the preset's output", || {
+        tmux(&["capture-pane", "-p", "-t", &format!("={preset}:")]).expect("capture-pane").contains("tmlsrs-42-ok")
+    });
+    assert_eq!(Path::new(&show(&preset, "#{pane_current_path}")), folder);
+}
+
+/// What the PTY has printed so far, read on a thread of its own.
+struct Screen {
+    chunks: Receiver<Vec<u8>>,
+    text: String,
+    ended: bool,
+}
+
+impl Screen {
+    fn of(pty: &Pty) -> Screen {
+        let mut reader = pty.reader().expect("the PTY's reader");
+        let (tx, chunks) = channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        Screen { chunks, text: String::new(), ended: false }
+    }
+
+    /// Reads on until `done` says so; fails the test after [`TIMEOUT`] or when the output ends first.
+    fn wait_for(&mut self, what: &str, done: impl Fn(&Screen) -> bool) {
+        let deadline = Instant::now() + TIMEOUT;
+        while !done(self) {
+            assert!(!self.ended, "the attach command ended before {what}; it printed: {:?}", self.text);
+            match self.chunks.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(chunk) => self.text.push_str(&String::from_utf8_lossy(&chunk)),
+                Err(RecvTimeoutError::Disconnected) => self.ended = true,
+                Err(RecvTimeoutError::Timeout) => panic!("timed out waiting for {what}; it printed: {:?}", self.text),
+            }
+        }
+    }
+}
+
+/// The byte a terminal sends for tmux's prefix key (`C-b` unless the user's tmux.conf says otherwise).
+fn prefix_byte() -> u8 {
+    let prefix = tmux(&["show-options", "-gv", "prefix"]).expect("the prefix option");
+    match prefix.trim().strip_prefix("C-").map(str::as_bytes) {
+        Some([letter]) if letter.is_ascii_alphabetic() => letter.to_ascii_lowercase() & 0x1f,
+        _ => panic!("this test can only type a Ctrl-letter tmux prefix, not {:?}", prefix.trim()),
+    }
+}
+
+#[test]
+fn attach_argv_attaches() {
+    let (_alone, dir) = private_server();
+    let mut created = Created(Vec::new());
+    let name = created.name("tmlsrs-test-attach it's");
+    go(&new_session_argv(&shell_in(dir, &name), LOCAL)).expect("creating the session");
+    assert_on_private_socket(&name, dir);
+    assert_eq!(show(&name, "#{session_attached}"), "0");
+
+    assert!(private_in_effect(), "no attach without the private server");
+    let pty = Pty::spawn(&attach_argv(&key(&name), LOCAL), 80, 24).expect("starting the attach command");
+    let mut screen = Screen::of(&pty);
+    wait_until("the client to attach", || show(&name, "#{session_attached}") == "1");
+
+    // the shell behind the prompt answers: the quotes make the answer differ from the typed line
+    pty.writer().write_all(b"echo tmlsrs-''42-ok\r").expect("typing");
+    screen.wait_for("the shell's answer on the PTY", |s| s.text.contains("tmlsrs-42-ok"));
+
+    pty.writer().write_all(&[prefix_byte(), b'd']).expect("typing the detach keys");
+    screen.wait_for("the attach command to end", |s| s.ended);
+    assert!(screen.text.contains("[detached"), "tmux did not say it detached: {:?}", screen.text);
+    assert_eq!(show(&name, "#{session_attached}"), "0");
+    assert_eq!(sessions(), only(&name), "detaching leaves the session running");
+}
+
+#[test]
+fn a_relative_path_is_found_in_the_panes_directory() {
+    let (_alone, dir) = private_server();
+    let mut created = Created(Vec::new());
+    let name = created.name("tmlsrs-test-a b'c files");
+    let folder = dir.join("files here");
+    std::fs::create_dir_all(folder.join("src")).expect("the session's folder");
+    std::fs::write(folder.join("src/-odd name.rs"), "fn main() {}\n").expect("the file");
+    go(&new_session_argv(&shell_in(&folder, &name), LOCAL)).expect("creating the session");
+    assert_on_private_socket(&name, dir);
+    wait_until("the pane's directory", || show(&name, "#{pane_current_path}").ends_with("files here"));
+
+    let out = go(&locate_argv(&key(&name), "src/-odd name.rs", LOCAL)).expect("locating");
+    let located = parse_located(&out).expect("kind, size and path");
+    assert_eq!(located.kind, Kind::File);
+    assert_eq!(located.size, 13);
+    assert_eq!(Path::new(&located.path), folder.join("src/-odd name.rs").as_path());
+
+    let missing = go(&locate_argv(&key(&name), "src/nope.rs", LOCAL)).expect_err("nothing there");
+    assert_eq!(format!("{missing:#}"), "not found");
+    // A session that does not exist names no directory: tmux's error, not a file at the root.
+    let nowhere = go(&locate_argv(&key("tmlsrs-test-not there"), "etc/passwd", LOCAL));
+    assert!(nowhere.is_err());
+}
+
+#[test]
+fn kill_pane_ends_the_pane_the_host_described_and_no_other() {
+    let (_alone, dir) = private_server();
+    let mut created = Created(Vec::new());
+    let name = created.name("tmlsrs-test-panes it's");
+    go(&new_session_argv(&shell_in(dir, &name), LOCAL)).expect("creating the session");
+    assert_on_private_socket(&name, dir);
+    let k = key(&name);
+    let panes = || -> Vec<String> {
+        let out = tmux(&["list-panes", "-s", "-t", &format!("={name}"), "-F", "#{pane_id}"]).expect("list-panes");
+        out.lines().map(str::to_string).collect()
+    };
+
+    // what the confirm is told: the pane, alone in its window, in a session of one window
+    let first = show(&name, "#{pane_id}");
+    let info = go(&pane_info_argv(&k, LOCAL)).expect("asking about the pane");
+    assert!(info.starts_with(&format!("{first} 1 1 ")), "{info:?}");
+    // before the answer to the confirm something splits the window: another pane is active
+    tmux(&["split-window", "-t", &format!("={name}:")]).expect("splitting");
+    let second = show(&name, "#{pane_id}");
+    assert_ne!(first, second);
+    let info = go(&pane_info_argv(&k, LOCAL)).expect("asking about the pane");
+    assert!(info.starts_with(&format!("{second} 2 1 ")), "{info:?}");
+
+    let out = go(&kill_pane_argv(&k, &first, LOCAL)).expect("killing the pane that was described");
+    assert!(!parse_kill_pane(&out), "the session has a pane left: {out:?}");
+    assert_eq!(panes(), only(&second));
+    // gone already: tmux's error, and nothing else is killed
+    let gone = go(&kill_pane_argv(&k, &first, LOCAL)).expect_err("the pane is gone");
+    assert!(gone.to_string().contains("can't find pane"), "{gone:#}");
+    assert_eq!(panes(), only(&second));
+
+    let out = go(&kill_pane_argv(&k, &second, LOCAL)).expect("killing the last pane");
+    assert!(parse_kill_pane(&out), "the session ended with it: {out:?}");
+    assert_eq!(sessions(), Vec::<String>::new());
+}
+
+/// A second tmux server a test started in the private directory (`tmux -L NAME`); killed when
+/// the test ends, however it ends, and nothing else is.
+struct Server(&'static str);
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        if private_in_effect() && self.0.starts_with(PREFIX) {
+            let _ = tmux(&["-L", self.0, "kill-server"]); // already gone is fine
+        }
+    }
+}
+
+#[test]
+fn another_tmux_server_is_found_by_its_socket() {
+    let (_alone, _dir) = private_server();
+    let server = Server("tmlsrs-test-bg");
+    let name = "tmlsrs-test-job";
+    tmux(&["-L", server.0, "new-session", "-d", "-s", name]).expect("starting the second server");
+
+    let out = go(&server_sockets_argv(LOCAL, LOCAL)).expect("listing the other servers");
+    let found = parse_background(LOCAL, &out);
+    let snap = found.iter().find(|snap| snap.host == "here#tmlsrs-test-bg").expect("the second server's snapshot");
+    let names: Vec<&str> = snap.sessions.iter().map(|s| s.key.name.as_str()).collect();
+    assert_eq!(names, [name]);
+    assert_eq!(snap.sessions[0].title.as_deref(), Some("tmux -L tmlsrs-test-bg"));
+    // The default server is not among them, running or not.
+    assert!(found.iter().all(|snap| snap.host != "here#default"));
+    // What attaches the session names the socket it was found by.
+    let attach = attach_argv(&snap.sessions[0].key, LOCAL);
+    assert_eq!(attach, ["tmux", "-u", "-L", "tmlsrs-test-bg", "attach", "-t", "=tmlsrs-test-job"]);
+    tmux(&["-L", server.0, "has-session", "-t", &format!("={name}")]).expect("the session is on that server");
+}
