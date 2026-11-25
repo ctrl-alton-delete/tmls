@@ -69,11 +69,11 @@ class AppFlowTest {
             compose.waitUntil(10_000) { notifications.activeNotifications.isNotEmpty() }
 
             if (!key.isNullOrBlank()) {
-                compose.waitUntil(30_000) { screen().contains("[$session") }
+                waitForScreen("[$session")
                 compose.onNodeWithTag("compose").performClick()
                 compose.onNodeWithTag("composer").performTextInput("echo flow-\$((6*7))-ok")
                 compose.onNodeWithTag("send").performClick()
-                compose.waitUntil(30_000) { screen().contains("flow-42-ok") }
+                waitForScreen("flow-42-ok")
             }
             compose.waitForIdle()
             assertTrue(app.sessions.tabs.size == 1)
@@ -87,6 +87,11 @@ class AppFlowTest {
         assertTrue(report.orEmpty(), report?.contains("IllegalStateException: test crash") == true && report.contains(BuildConfig.COMMIT))
         CrashLog.dismiss(app)
         assertTrue(CrashLog.pending(app) == null)
+    }
+
+    private fun waitForScreen(text: String) {
+        runCatching { compose.waitUntil(30_000) { screen().contains(text) } }
+            .onFailure { throw AssertionError("'$text' not on screen; ended=${app.sessions.current?.ended}; screen:\n${screen()}") }
     }
 
     private fun screen(): String {
