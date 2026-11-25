@@ -149,7 +149,8 @@ jobs:
             adb logcat -d > ../logcat.txt
       - name: Spike report
         if: always()
-        run: grep -E "System.out" logcat.txt | sed 's/.*System.out: //' || true
+        run: |
+          grep -E "System.out" logcat.txt | sed 's/.*System.out: //' || true
       - uses: actions/upload-artifact@v5
         if: always()
         with:
