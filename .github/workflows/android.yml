@@ -78,6 +78,21 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked --version ^4
       - uses: gradle/actions/setup-gradle@v5
+      - name: Fixed debug signing key (secrets; absent on forks of the fork)
+        env:
+          KEYSTORE_B64: ${{ secrets.TMLS_DEBUG_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.TMLS_DEBUG_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.TMLS_DEBUG_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.TMLS_DEBUG_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then echo "no key: the build uses a throwaway debug key"; exit 0; fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/debug.keystore"
+          {
+            echo "TMLS_DEBUG_KEYSTORE=$RUNNER_TEMP/debug.keystore"
+            echo "TMLS_DEBUG_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "TMLS_DEBUG_KEY_ALIAS=$KEY_ALIAS"
+            echo "TMLS_DEBUG_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
       - name: Build, unit tests, lint
         working-directory: android
         # the runner's newest NDK; ANDROID_NDK_LATEST_HOME is a runner variable, not in ${{ env }}
@@ -85,10 +100,13 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           echo "NDK: $ANDROID_NDK_HOME"
           ./gradlew --no-daemon assembleDebug testDebugUnitTest lint
-      - name: Check the Rust library and ssh are in the APK
+      - name: Check the Rust library, ssh and libtermux are in the APK
         run: |
           unzip -l android/app/build/outputs/apk/debug/app-debug.apk | tee /tmp/apk.txt | grep -E 'lib/(arm64-v8a|x86_64)/lib(core_ffi|ssh|scp|ssh-keygen)\.so'
-          test "$(grep -cE 'lib/(arm64-v8a|x86_64)/lib(core_ffi|ssh|scp|ssh-keygen)\.so' /tmp/apk.txt)" = 8
+          test "$(grep -cE 'lib/(arm64-v8a|x86_64)/lib(core_ffi|ssh|scp|ssh-keygen|termux)\.so' /tmp/apk.txt)" = 10
+      - name: Signing certificate (fixed key = 14:CF:9E:8F…4F:D6)
+        run: |
+          "$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner" verify --print-certs android/app/build/outputs/apk/debug/app-debug.apk | grep -i sha-256
       - uses: actions/upload-artifact@v5
         with:
           name: tmls-android-debug-${{ github.sha }}

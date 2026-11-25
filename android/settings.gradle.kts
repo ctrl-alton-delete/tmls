@@ -10,9 +10,12 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // Termux's terminal-emulator (M1 spike; vendored in M2, spec Q1)
-        maven("https://jitpack.io") { content { includeGroup("com.github.termux.termux-app") } }
     }
 }
 rootProject.name = "tmls-android"
 include(":app")
+// Termux's terminal libraries, vendored (spec Q1): third_party/termux/PATCHES.md
+include(":terminal-emulator", ":terminal-view", ":extrakeys")
+project(":terminal-emulator").projectDir = file("third_party/termux/terminal-emulator")
+project(":terminal-view").projectDir = file("third_party/termux/terminal-view")
+project(":extrakeys").projectDir = file("third_party/termux/extrakeys")

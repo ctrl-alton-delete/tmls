@@ -114,6 +114,19 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // A fixed debug key (CI secrets; backup outside the repo), so each CI build installs over
+    // the last one and keeps the app's keys and config. Without the variables: the usual
+    // per-machine debug key.
+    val keystore = System.getenv("TMLS_DEBUG_KEYSTORE")?.let(::file)?.takeIf { it.isFile }
+    if (keystore != null) {
+        signingConfigs.getByName("debug") {
+            storeFile = keystore
+            storePassword = System.getenv("TMLS_DEBUG_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("TMLS_DEBUG_KEY_ALIAS")
+            keyPassword = System.getenv("TMLS_DEBUG_KEY_PASSWORD")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -159,7 +172,7 @@ dependencies {
     debugImplementation(libs.compose.ui.tooling)
     implementation(libs.jna) { artifact { type = "aar" } }
     implementation(libs.kotlinx.coroutines.android)
-    implementation(libs.termux.terminal.emulator)
+    implementation(project(":extrakeys"))
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.runner)
