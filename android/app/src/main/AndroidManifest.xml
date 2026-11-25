@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- outbound ssh only (spec SEC-1: the app never listens) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:name=".TmlsApp"
         android:allowBackup="false"
