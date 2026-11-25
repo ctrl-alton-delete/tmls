@@ -99,7 +99,7 @@ Answers risk R1 and R2 before anything is built on top.
       needs only Android's libc. Two additions: a forced-include `pwd.h` shim so `~` is
       `$HOME` (so C1 is not needed), and an SSHFP (`VerifyHostKeyDNS`) stub that always
       fails, since Android lacks the resolver internals. About 10–11 MB per ABI unpacked.
-- [ ] In the spike app: create `$APP/bin/ssh → $nativeLibraryDir/libssh.so`, set `PATH`,
+- [x] In the spike app: create `$APP/bin/ssh → $nativeLibraryDir/libssh.so`, set `PATH`,
       `HOME=$APP/home`, and check:
   1. `TerminalSession` running `ssh -t alton-desktop tmux attach` shows a working tmux.
   2. Rust `Command::new("ssh")` from `core-ffi` runs `ssh -o BatchMode=yes host true`.
@@ -112,6 +112,17 @@ Answers risk R1 and R2 before anything is built on top.
       sshd + tmux test host (`tooling/android/testhost`), key auth. All pass on API 34
       (run 45697354122, 7a11687). Note: ssh's default user is the app's uid name
       (`u0_a…`), so every host needs `User` set.
+- **Result (2026-11-25): GO.** On the Fairphone (APK 7a11687) all checks pass: TerminalSession
+      `ssh -t … tmux new-session -A` and client-core's `attach_argv` both show tmux; Rust
+      `Command` 198 ms; ControlMaster socket in `files/run`, master running, second command
+      138 ms; Tailscale SSH (auth method none), `alton-desktop-home.<tailnet>.ts.net` resolved
+      to its 100.x address through bionic over the VPN (MagicDNS FQDN works); ssh reads
+      `$HOME/.ssh/config`, so C1 is not needed. Key auth passed on the emulator (publickey);
+      the phone key test (Part B, against z2term's sshd) is optional and still open.
+      Setup finding: a first run failed with "Could not resolve hostname" because the host was
+      an alias defined only in the old Termux config; hosts need an explicit `HostName` (the
+      MagicDNS FQDN or 100.x address) and a `User` (see spec HOST-2). Short MagicDNS names
+      (search domain) are untested.
 - **Exit (go):** all five pass on the Fairphone. **No-go:** switch to the fallback in R1 and
   re-plan M3 (in-process ssh behind a `Transport` trait in `core-ffi`).
 

@@ -161,6 +161,12 @@ Priority: **P0** = needed for the first usable build (M2–M5), **P1** = v1.0, *
   `~/.config/tmls/`, one per line. Aliases, users, ports and keys live in `~/.ssh/config`.
 - **HOST-2 (P0)** A host editor in the app writes both files: name, hostname, user, port, identity,
   optional `ProxyJump`. Advanced users can edit the raw `~/.ssh/config` in a text editor screen.
+  The hostname field is explicit and its help says to use the full MagicDNS name
+  (`box.tailnet.ts.net`) or the 100.x address: on the Fairphone the FQDN resolved over the
+  Tailscale VPN (M1), while an alias known only to another machine's ssh config does not.
+  The user field defaults from an app-wide default user, written as `User` under a final
+  `Host *` block (ssh's first value wins, so per-host `User` overrides it); without any `User`,
+  ssh would log in as the app's Android uid name (`u0_a…`).
 - **HOST-3 (P0)** Keys: generate an ed25519 key in the app (optional passphrase), show and copy
   the public key, and offer to share it. Import an existing private key from a file (SAF picker).
   Keys stay in app-private storage (OpenSSH needs a file; the Android Keystore cannot be used by
