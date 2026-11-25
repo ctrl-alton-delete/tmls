@@ -29,6 +29,7 @@ class TmlsApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        CrashLog.install(this)
         tools = BundledTools(this).install()
         settings = Settings(this)
         hosts = HostStore(tools)

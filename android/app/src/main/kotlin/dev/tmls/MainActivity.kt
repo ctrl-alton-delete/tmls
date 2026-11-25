@@ -10,7 +10,13 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.getValue
@@ -18,6 +24,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import dev.tmls.core.agentRules
 import dev.tmls.core.version
@@ -47,6 +57,8 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
+                var crash by rememberSaveable { mutableStateOf(CrashLog.pending(this)) }
+                crash?.let { report -> CrashDialog(report, onDismiss = { CrashLog.dismiss(this); crash = null }) }
                 var screen by rememberSaveable { mutableStateOf(if (app.sessions.current != null) Screen.Terminal else Screen.Home) }
                 BackHandler(enabled = screen != Screen.Home) { screen = Screen.Home }
                 if (screen == Screen.Terminal) {
@@ -87,6 +99,23 @@ class MainActivity : ComponentActivity() {
     }
 
     enum class Screen { Home, Terminal, Hosts, Keys, Settings, Diagnostics }
+}
+
+/** The last crash's report (CrashLog), so it can be copied and sent without adb. */
+@androidx.compose.runtime.Composable
+private fun CrashDialog(report: String, onDismiss: () -> Unit) {
+    @Suppress("DEPRECATION") val clipboard = LocalClipboardManager.current
+    AlertDialog(
+        onDismissRequest = {},
+        title = { Text("tmls crashed last time") },
+        text = {
+            SelectionContainer(Modifier.verticalScroll(rememberScrollState())) {
+                Text(report, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+            }
+        },
+        confirmButton = { TextButton(onClick = { clipboard.setText(AnnotatedString(report)) }) { Text("Copy") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Dismiss") } },
+    )
 }
 
 data class CoreInfo(val version: String, val agentRules: Int)

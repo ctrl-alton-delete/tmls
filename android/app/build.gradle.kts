@@ -112,6 +112,8 @@ android {
         versionName = "0.1.0"
         ndk { abiFilters += shippedAbis }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // shown in crash reports (CrashLog), so a report names the build it came from
+        buildConfigField("String", "COMMIT", "\"${System.getenv("GITHUB_SHA")?.take(7) ?: "local"}\"")
     }
 
     // A fixed debug key (CI secrets; backup outside the repo), so each CI build installs over
@@ -138,7 +140,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 
     packaging {
         jniLibs {
@@ -177,4 +182,8 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    debugImplementation(libs.compose.ui.test.manifest)
 }
