@@ -44,6 +44,8 @@ public class SpecialButtonState {
     /** Set {@link #isLocked}. */
     public void setIsLocked(boolean value) {
         isLocked = value;
+        // tmls patch (spec KB-2): a locked key is filled, not only coloured
+        buttons.forEach(button -> button.setBackgroundColor(value ? mExtraKeysView.getButtonActiveBackgroundColor() : mExtraKeysView.getButtonBackgroundColor()));
     }
 
 }

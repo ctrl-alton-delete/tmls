@@ -55,14 +55,13 @@ fun SpikeScreen(checks: SpikeChecks, header: String, modifier: Modifier = Modifi
     }
 
     Column(modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("tmls · M1 spike", style = MaterialTheme.typography.headlineSmall)
+        Text("Diagnostics (M1 checks)", style = MaterialTheme.typography.headlineSmall)
         Text(header, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(host, { host = it.trim() }, label = { Text("Host") }, singleLine = true, modifier = Modifier.weight(1f))
             OutlinedTextField(user, { user = it.trim() }, label = { Text("User") }, singleLine = true, modifier = Modifier.weight(1f))
         }
-        OutlinedButton(onClick = { config = SpikeChecks.defaultConfig(host, user) }) { Text("Reset config for this host/user") }
         OutlinedTextField(
             config, { config = it }, label = { Text("~/.ssh/config") },
             textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),

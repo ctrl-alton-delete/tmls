@@ -19,3 +19,8 @@ Every change to upstream files is listed here, newest last, so an update can re-
 
 1. `terminal-emulator/src/main/AndroidManifest.xml`, `terminal-view/src/main/AndroidManifest.xml`:
    `package="…"` removed (AGP 9 takes the namespace from Gradle and rejects the attribute).
+2. `extrakeys/…/ExtraKeysView.java`: a second tap on an active CTRL/ALT/SHIFT/FN within the
+   double-tap timeout locks it (spec KB-2; long press still locks too, as upstream).
+3. `extrakeys/…/SpecialButtonState.java`: a locked special key gets the active background
+   colour, so locked differs visibly from active-once (spec KB-2); `ExtraKeysView` keeps that
+   fill when the finger lifts (`restingBackground`).

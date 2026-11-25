@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">tmls</string>
+    <string name="channel_sessions">Open sessions</string>
+    <plurals name="sessions_open">
+        <item quantity="one">%d tmux session open</item>
+        <item quantity="other">%d tmux sessions open</item>
+    </plurals>
+    <string name="sessions_open_text">Keeps the ssh connections of your tabs alive.</string>
+    <string name="detach_all">Detach all</string>
 </resources>

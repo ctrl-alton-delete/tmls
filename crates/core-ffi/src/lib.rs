@@ -95,6 +95,35 @@ pub fn attach_argv(host: String, name: String) -> Vec<String> {
     client_core::tmux::attach_argv(&client_core::SessionKey { host, name }, LOCAL_NAME)
 }
 
+/// The argv for a terminal on session `name` on `host` that creates the session when there is
+/// none (`ssh -t HOST tmux new-session -A -s NAME`): M2's "type a session name" picker. Check the
+/// name with [`valid_session_name`] first.
+#[uniffi::export]
+pub fn open_argv(host: String, name: String) -> Vec<String> {
+    let mut argv = client_core::tmux::ssh_base(&host, &["-t"]);
+    argv.push(format!("tmux -u new-session -A -s {}", shell_quote(&name)));
+    argv
+}
+
+/// Why tmux cannot use `name` as a session name as it is (for the user), or nothing.
+#[uniffi::export]
+pub fn session_name_problem(name: String) -> Option<String> {
+    client_core::tmux::valid_session_name(&name).err()
+}
+
+/// The argv that prints `host`'s tmux prefix key (`C-b` unless the host's tmux sets another),
+/// for the extra-keys row's PREFIX key (spec KB-1).
+#[uniffi::export]
+pub fn prefix_argv(host: String) -> Vec<String> {
+    ssh_argv(host, "tmux start-server \\; show-options -gv prefix".to_string())
+}
+
+/// One word for a POSIX shell: as it is when it only has safe characters, else in single quotes.
+fn shell_quote(word: &str) -> String {
+    let safe = !word.is_empty() && word.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./@%+=,".contains(&b));
+    if safe { word.to_string() } else { format!("'{}'", word.replace('\'', "'\\''")) }
+}
+
 /// Runs `argv` as `client-core` runs every command (`tmux::run`: killed with its process group
 /// after `timeout_ms`), resolving the program through this process's `PATH`; what it printed on
 /// stdout, or why it failed.
@@ -125,6 +154,21 @@ mod tests {
         let argv = attach_argv("phone".to_string(), "work".to_string());
         assert_eq!(argv[0], "ssh");
         assert!(argv.contains(&"-t".to_string()));
+    }
+
+    #[test]
+    fn open_argv_creates_or_attaches_with_a_quoted_name() {
+        let argv = open_argv("box".to_string(), "it's".to_string());
+        assert_eq!(argv.last().unwrap(), "tmux -u new-session -A -s 'it'\\''s'");
+        assert_eq!(argv[argv.len() - 2], "box");
+        assert!(argv.contains(&"-t".to_string()));
+        assert_eq!(open_argv("box".into(), "work".into()).last().unwrap(), "tmux -u new-session -A -s work");
+    }
+
+    #[test]
+    fn session_names_are_checked_by_client_core() {
+        assert!(session_name_problem("work".into()).is_none());
+        assert!(session_name_problem("a.b".into()).is_some());
     }
 
     #[test]

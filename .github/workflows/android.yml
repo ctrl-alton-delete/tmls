@@ -120,7 +120,7 @@ jobs:
   emulator:
     # Plan M1 on Android 14 (the Fairphone's version), x86_64: every spike check against a
     # test host (sshd + tmux in Docker on this machine, 10.0.2.2:2222 from the emulator).
-    name: M1 spike checks on the emulator (API 34)
+    name: Emulator checks, M1 spike + M2 tabs (API 34)
     runs-on: ubuntu-latest
     needs: binaries
     steps:
@@ -154,7 +154,7 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Spike checks
+      - name: Emulator checks
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34

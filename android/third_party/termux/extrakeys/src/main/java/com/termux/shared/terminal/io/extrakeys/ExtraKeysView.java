@@ -194,6 +194,10 @@ public final class ExtraKeysView extends GridLayout {
     private SpecialButtonsLongHoldRunnable mSpecialButtonsLongHoldRunnable;
     private int mLongPressCount;
 
+    /** tmls patch (KB-2): the special key tapped last and when, to see a double tap. */
+    private String mLastSpecialTapKey;
+    private long mLastSpecialTapTime;
+
 
     public ExtraKeysView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -422,12 +426,12 @@ public final class ExtraKeysView extends GridLayout {
                             return true;
 
                         case MotionEvent.ACTION_CANCEL:
-                            view.setBackgroundColor(mButtonBackgroundColor);
+                            view.setBackgroundColor(restingBackground(buttonInfo));
                             stopScheduledExecutors();
                             return true;
 
                         case MotionEvent.ACTION_UP:
-                            view.setBackgroundColor(mButtonBackgroundColor);
+                            view.setBackgroundColor(restingBackground(buttonInfo));
                             stopScheduledExecutors();
                             // If ACTION_UP up was not from a repetitive key or was with a key with a popup button
                             if (mLongPressCount == 0 || mPopupWindow != null) {
@@ -463,6 +467,15 @@ public final class ExtraKeysView extends GridLayout {
 
 
 
+    /** tmls patch (KB-2): a locked special key keeps its fill after the finger lifts. */
+    private int restingBackground(ExtraKeyButton buttonInfo) {
+        if (isSpecialButton(buttonInfo)) {
+            SpecialButtonState state = mSpecialButtons.get(SpecialButton.valueOf(buttonInfo.getKey()));
+            if (state != null && state.isLocked) return mButtonActiveBackgroundColor;
+        }
+        return mButtonBackgroundColor;
+    }
+
     private void onExtraKeyButtonClick(View view, ExtraKeyButton buttonInfo, Button button) {
         if (mExtraKeysViewClient != null)
             mExtraKeysViewClient.onExtraKeyButtonClick(view, buttonInfo, button);
@@ -496,6 +509,17 @@ public final class ExtraKeysView extends GridLayout {
             if (mLongPressCount > 0) return;
             SpecialButtonState state = mSpecialButtons.get(SpecialButton.valueOf(buttonInfo.getKey()));
             if (state == null) return;
+
+            // tmls patch (spec KB-2): a second tap within the double-tap timeout locks the key
+            long now = android.os.SystemClock.uptimeMillis();
+            boolean doubleTap = state.isActive && !state.isLocked && mLastSpecialTapKey == buttonInfo.getKey()
+                && now - mLastSpecialTapTime <= ViewConfiguration.getDoubleTapTimeout();
+            mLastSpecialTapKey = doubleTap ? null : buttonInfo.getKey();
+            mLastSpecialTapTime = now;
+            if (doubleTap) {
+                state.setIsLocked(true);
+                return;
+            }
 
             // Toggle active state and disable lock state if new state is not active
             state.setIsActive(!state.isActive);

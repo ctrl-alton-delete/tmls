@@ -9,6 +9,7 @@ import dev.tmls.core.sshArgv
 import dev.tmls.core.sshBase
 import dev.tmls.core.useControlMaster
 import dev.tmls.ssh.BundledTools
+import dev.tmls.ssh.SshConfig
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import java.io.File
@@ -78,7 +79,7 @@ class SpikeChecks(private val tools: BundledTools) {
 
         add(tools())
         add(kotlinExec())
-        add(configRead())
+        add(configRead(host))
         add(rustExec())
         if (host.isBlank()) {
             add(Check("host", "Host checks", Outcome.SKIP, "no host given"))
@@ -110,21 +111,29 @@ class SpikeChecks(private val tools: BundledTools) {
         Check("2k", "Kotlin exec: ssh -V", if (ok) Outcome.PASS else Outcome.FAIL, "exit ${p.code}: $version")
     }
 
-    private fun configRead(): Check = guarded("5", "ssh reads \$HOME/.ssh/config") {
-        val p = exec(listOf(tools.program("ssh").absolutePath, "-G", PROBE_HOST))
+    /**
+     * ssh reads `$HOME/.ssh/config`: known_hosts is under HOME, and a value only the config has
+     * shows up (the probe host's port, or [host]'s HostName from the host editor).
+     */
+    private fun configRead(host: String): Check = guarded("5", "ssh reads \$HOME/.ssh/config") {
+        val configured = SshConfig.parse(readConfig()).host(host)?.hostName?.takeIf { it.isNotEmpty() }
+        val target = if (configured != null) host else PROBE_HOST
+        val p = exec(listOf(tools.program("ssh").absolutePath, "-G", target))
         val known = "${tools.home.absolutePath}/.ssh/known_hosts"
-        val port = p.out.lines().any { it == "port $PROBE_PORT" }
+        val fromConfig = if (configured != null) p.out.lines().any { it == "hostname ${configured.lowercase()}" || it == "hostname $configured" }
+            else p.out.lines().any { it == "port $PROBE_PORT" }
         val knownHosts = p.out.lines().any { it.startsWith("userknownhostsfile ") && it.contains(known) }
-        val ok = p.code == 0 && port && knownHosts
-        val shown = p.out.lines().filter { it.startsWith("port ") || it.startsWith("userknownhostsfile ") || it.startsWith("identityfile ") || it.startsWith("user ") }
+        val ok = p.code == 0 && fromConfig && knownHosts
+        val shown = p.out.lines().filter { it.startsWith("hostname ") || it.startsWith("port ") || it.startsWith("userknownhostsfile ") || it.startsWith("identityfile ") || it.startsWith("user ") }
+        val what = if (configured != null) "$host's HostName from config" else "probe port from config"
         Check("5", "ssh reads \$HOME/.ssh/config", if (ok) Outcome.PASS else Outcome.FAIL,
-            "exit ${p.code}; probe port from config: $port; known_hosts under HOME: $knownHosts\n${shown.joinToString("\n")}\n${p.err.trim()}")
+            "exit ${p.code}; $what: $fromConfig; known_hosts under HOME: $knownHosts\n${shown.joinToString("\n")}\n${p.err.trim()}")
     }
 
     private fun rustExec(): Check = guarded("2r", "Rust Command: ssh found on PATH") {
         val out = coreRun(listOf("ssh", "-G", PROBE_HOST), 10_000u)
-        val ok = out.lines().any { it == "port $PROBE_PORT" }
-        Check("2r", "Rust Command: ssh found on PATH", if (ok) Outcome.PASS else Outcome.FAIL, out.lines().firstOrNull { it.startsWith("port ") } ?: out.take(200))
+        val ok = out.lines().any { it.startsWith("userknownhostsfile ") }
+        Check("2r", "Rust Command: ssh found on PATH", if (ok) Outcome.PASS else Outcome.FAIL, out.lines().firstOrNull { it.startsWith("userknownhostsfile ") } ?: out.take(200))
     }
 
     private fun rustRemote(host: String): Check = guarded("2", "Rust Command: ssh $host (BatchMode)") {
