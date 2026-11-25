@@ -142,6 +142,8 @@ Decisions:
   `MonitorService` (foreground service type `dataSync`; `specialUse` if `dataSync` time limits
   bite on Android 15+) so alerts keep working with the app in the background. Terminal sessions
   are owned by the same service so tabs survive the Activity being destroyed.
+  M2: the tabs' service (`TerminalService`) is `specialUse` from the start, since open tabs stay
+  up all day and `dataSync` gets 6 hours a day on Android 15+.
 - **ARCH-6 — Files.** `$APP` is the app's files directory (`Context.getFilesDir()`,
   `/data/user/<user>/dev.tmls/files`). App-private storage only: `$APP/home/.ssh/` (config, keys,
   known_hosts, ControlMaster sockets in `$APP/run/`), `$APP/home/.config/tmls/` (tmls's own

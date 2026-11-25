@@ -130,23 +130,30 @@ Answers risk R1 and R2 before anything is built on top.
 
 The first build Alton can use daily: one tab per host session, good keys. No Rust listing yet.
 
-- [ ] Vendor Termux `terminal-emulator`, `terminal-view`, and `termux-shared`'s
+- [x] Vendor Termux `terminal-emulator`, `terminal-view`, and `termux-shared`'s
       `extrakeys/*` + their small dependencies into `android/third_party/termux/` (Q1),
       at the commit of termux-app 0.118.x. Record it in `PATCHES.md`.
-- [ ] `TerminalHost` composable: `AndroidView(TerminalView)`, `ExtraKeysView` below it,
+- [x] `TerminalHost` composable: `AndroidView(TerminalView)`, `ExtraKeysView` below it,
       insets handling so the keys sit right above the IME (`WindowInsets.ime`).
-- [ ] `SessionManager` in a bound foreground service holding `TerminalSession`s (ARCH-5),
+- [x] `SessionManager` in a bound foreground service holding `TerminalSession`s (ARCH-5),
       so rotation and backgrounding keep tabs alive.
-- [ ] Temporary host/session picker: hosts from the `hosts` file, a typed session name,
+- [x] Temporary host/session picker: hosts from the `hosts` file, a typed session name,
       attach argv built in Kotlin (replaced by Rust in M3).
-- [ ] Keyboard: KB-1 default layout, KB-2 sticky modifiers (Termux behaviour, verify
+- [x] Keyboard: KB-1 default layout, KB-2 sticky modifiers (Termux behaviour, verify
       "modifier applies to soft-keyboard key" works with Gboard), KB-3 popups, KB-4 IME mode
       setting, KB-5 hardware keys, `PREFIX` and `KEYBOARD` keys.
-- [ ] **Composer (KB-8)**: bottom sheet with a normal `TextField`; Send = bracketed paste.
+- [x] **Composer (KB-8)**: bottom sheet with a normal `TextField`; Send = bracketed paste.
       In M2 it sends via the PTY (`ESC[200~ … ESC[201~` then `\r`); M3 moves it to
       `tmux::send_text_argv`.
-- [ ] TERM-1, TERM-3 (manual reattach only), TERM-4, TERM-5, TERM-6.
-- [ ] Host editor + key generation (HOST-2, HOST-3, HOST-4, SEC-5).
+- [x] TERM-1, TERM-3 (manual reattach only), TERM-4, TERM-5, TERM-6.
+- [x] Host editor + key generation (HOST-2, HOST-3, HOST-4, SEC-5).
+- Status (2026-11-25): all items built (db2d140, 55be656); CI emulator test opens a tab against
+  the test host, sends from the composer, detaches and reattaches. Differences: the service is
+  a started `specialUse` foreground service holding a process-wide `SessionManager` (not bound);
+  the composer opens from a ✎ in the tab strip (or a `COMPOSE` key); attach argv comes from
+  `core-ffi` (`open_argv`, create-or-attach) rather than Kotlin; KEYBOARD key toggles the IME
+  (no double-tap on the row); sticky-modifier double-tap lock is a vendored patch. Open: the
+  IME checklist on the Fairphone and the day of use.
 - **Exit:** IME checklist (§5.3) passes on Gboard; Alton uses it for a day instead of z2term's
   ssh for remote tmux.
 
