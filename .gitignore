@@ -2,3 +2,6 @@ target/
 target-docker/
 tooling/smoke/__pycache__/
 target-win/
+
+# tooling/android/binaries/build.sh output (CI builds it; locally: build.sh tooling/android/binaries/out)
+tooling/android/binaries/out/

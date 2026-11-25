@@ -29,11 +29,42 @@ jobs:
           key: rust-tests
       - run: cargo test --locked -p client-core -p core-ffi
 
-  apk:
-    name: APK (arm64-v8a + x86_64)
+  binaries:
+    name: OpenSSH for Android (arm64-v8a + x86_64)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - id: key
+        run: echo "hash=${{ hashFiles('tooling/android/binaries/**') }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: tooling/android/binaries/out
+          key: ssh-binaries-${{ steps.key.outputs.hash }}
+      - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update && sudo apt-get install -y autoconf automake
+          . tooling/android/binaries/VERSIONS
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" >/dev/null
+          ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION" tooling/android/binaries/build.sh tooling/android/binaries/out
+          rm -rf tooling/android/binaries/out/.work
+      - run: ls -l tooling/android/binaries/out/*
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ssh-binaries
+          path: tooling/android/binaries/out
+
+  apk:
+    name: APK (arm64-v8a + x86_64)
+    runs-on: ubuntu-latest
+    needs: binaries
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: ssh-binaries
+          path: tooling/android/binaries/out
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -54,10 +85,10 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           echo "NDK: $ANDROID_NDK_HOME"
           ./gradlew --no-daemon assembleDebug testDebugUnitTest lint
-      - name: Check the Rust library is in the APK
+      - name: Check the Rust library and ssh are in the APK
         run: |
-          unzip -l android/app/build/outputs/apk/debug/app-debug.apk | tee /tmp/apk.txt | grep -E 'lib/(arm64-v8a|x86_64)/libcore_ffi.so'
-          test "$(grep -cE 'lib/(arm64-v8a|x86_64)/libcore_ffi.so' /tmp/apk.txt)" = 2
+          unzip -l android/app/build/outputs/apk/debug/app-debug.apk | tee /tmp/apk.txt | grep -E 'lib/(arm64-v8a|x86_64)/lib(core_ffi|ssh|scp|ssh-keygen)\.so'
+          test "$(grep -cE 'lib/(arm64-v8a|x86_64)/lib(core_ffi|ssh|scp|ssh-keygen)\.so' /tmp/apk.txt)" = 8
       - uses: actions/upload-artifact@v5
         with:
           name: tmls-android-debug-${{ github.sha }}
@@ -67,3 +98,62 @@ jobs:
         with:
           name: lint-report
           path: android/app/build/reports/lint-results-debug.html
+
+  emulator:
+    # Plan M1 on Android 14 (the Fairphone's version), x86_64: every spike check against a
+    # test host (sshd + tmux in Docker on this machine, 10.0.2.2:2222 from the emulator).
+    name: M1 spike checks on the emulator (API 34)
+    runs-on: ubuntu-latest
+    needs: binaries
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: ssh-binaries
+          path: tooling/android/binaries/out
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-emulator
+      - run: cargo install cargo-ndk --locked --version ^4
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Test host (sshd + tmux)
+        run: |
+          ssh-keygen -q -t ed25519 -N '' -C tmls-ci -f "$RUNNER_TEMP/testhost_key"
+          docker build -q -t tmls-testhost tooling/android/testhost
+          docker run -d --name testhost -p 2222:2222 -e AUTHORIZED_KEY="$(cat "$RUNNER_TEMP/testhost_key.pub")" tmls-testhost
+          sleep 2
+          ssh -i "$RUNNER_TEMP/testhost_key" -o StrictHostKeyChecking=no -p 2222 tmls@127.0.0.1 'tmux -V'
+          echo "SSH_KEY_B64=$(base64 -w0 "$RUNNER_TEMP/testhost_key")" >> "$GITHUB_ENV"
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Spike checks
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          working-directory: android
+          script: |
+            export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"; ./gradlew --no-daemon -Ptmls.abis=x86_64 connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.sshKey=$SSH_KEY_B64" || { adb logcat -d > ../logcat.txt; exit 1; }
+            adb logcat -d > ../logcat.txt
+      - name: Spike report
+        if: always()
+        run: grep -E "System.out" logcat.txt | sed 's/.*System.out: //' || true
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: emulator-results
+          path: |
+            logcat.txt
+            android/app/build/reports/androidTests/

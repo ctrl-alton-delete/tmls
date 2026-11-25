@@ -25,3 +25,4 @@ bindgen = ["uniffi/cli"]
 [dependencies]
 client-core = { path = "../client-core" }
 uniffi = "0.32"
+thiserror = "2"

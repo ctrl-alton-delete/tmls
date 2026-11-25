@@ -20,6 +20,11 @@ val rustSources = files(
 )
 // ABIs shipped in the APK (spec NF-3); `-Ptmls.abis=arm64-v8a` builds one for a faster loop.
 val shippedAbis: List<String> = (findProperty("tmls.abis") as String? ?: "arm64-v8a,x86_64").split(",").map { it.trim() }
+// The bundled OpenSSH (tooling/android/binaries/build.sh output: <abi>/libssh.so …), shipped as
+// jniLibs (spec ARCH-3). `-Ptmls.binaries=DIR` points elsewhere; without the directory the APK
+// builds without ssh and the app says so.
+val sshBinaries: File = (findProperty("tmls.binaries") as String?)?.let { file(it) }
+    ?: cargoWorkspace.resolve("tooling/android/binaries/out")
 // `-Ptmls.rust=false` skips the Android build of the Rust library (no NDK or Android Rust targets
 // needed); the APK then builds but fails at runtime when it calls into Rust.
 val rustWanted: Boolean = (findProperty("tmls.rust") as String?)?.toBoolean() ?: true
@@ -106,6 +111,7 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         ndk { abiFilters += shippedAbis }
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -135,6 +141,11 @@ androidComponents {
     onVariants { variant ->
         variant.sources.jniLibs?.addGeneratedSourceDirectory(cargoNdk, CargoNdkTask::outDir)
         variant.sources.kotlin?.addGeneratedSourceDirectory(uniffiBindings, UniffiBindingsTask::outDir)
+        if (sshBinaries.isDirectory) {
+            variant.sources.jniLibs?.addStaticSourceDirectory(sshBinaries.absolutePath)
+        } else {
+            logger.warn("tmls: no ssh binaries in $sshBinaries; the APK will not have ssh")
+        }
     }
 }
 
@@ -147,6 +158,10 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     debugImplementation(libs.compose.ui.tooling)
     implementation(libs.jna) { artifact { type = "aar" } }
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.termux.terminal.emulator)
 
     testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }

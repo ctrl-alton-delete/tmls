@@ -1,0 +1,27 @@
+# Pinned inputs of build.sh (sourced by bash). Changing any line rebuilds the binaries in CI
+# (the cache key is this file's hash plus build.sh's and tmls_pwd.h's).
+#
+# Versions and sha256s are the ones termux-packages ships at TERMUX_PACKAGES_COMMIT
+# (packages/{openssh,openssl,zlib}/build.sh); the OpenSSH patches come from that commit too.
+TERMUX_PACKAGES_COMMIT=c19bbb9f22f9424f11589854d8b3d8a8404a785a
+
+OPENSSH_VERSION=10.6p2
+OPENSSH_URL=https://ftp.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p2.tar.gz
+OPENSSH_SHA256=9ae44872090cf2f06b3cf9ff147e7f16f309671340763ed2f99248398ae29d5b
+
+OPENSSL_VERSION=3.6.5
+OPENSSL_URL=https://github.com/openssl/openssl/releases/download/openssl-3.6.5/openssl-3.6.5.tar.gz
+OPENSSL_SHA256=a2157c2830efdec3788939b00c9b0638306d3f0bbb76dc4832ee503bb397df98
+
+ZLIB_VERSION=1.4
+ZLIB_URL=https://github.com/madler/zlib/releases/download/v1.4/zlib-1.4.tar.xz
+ZLIB_SHA256=4f11c512053d7bab8d9e9b89bde3575add3e4c50a383b42ef6cb837035fc5a7c
+
+# NDK the binaries are built with, and the API level they target (the app's minSdk)
+NDK_VERSION=29.0.14206865
+ANDROID_API=29
+
+# Where the app lives on the device (spec ARCH-3, ARCH-6; package dev.tmls). Compiled into
+# ssh as fallbacks only: HOME from the environment wins (tmls_pwd.h), and the app passes
+# config paths explicitly where it matters.
+APP_DIR=/data/data/dev.tmls/files
