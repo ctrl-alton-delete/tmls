@@ -80,6 +80,15 @@ class AppFlowTest {
         }
     }
 
+    @Test
+    fun crashReportShownOnce() {
+        CrashLog.write(app, Thread.currentThread(), IllegalStateException("test crash"))
+        val report = CrashLog.pending(app)
+        assertTrue(report.orEmpty(), report?.contains("IllegalStateException: test crash") == true && report.contains(BuildConfig.COMMIT))
+        CrashLog.dismiss(app)
+        assertTrue(CrashLog.pending(app) == null)
+    }
+
     private fun screen(): String {
         var text = ""
         InstrumentationRegistry.getInstrumentation().runOnMainSync {

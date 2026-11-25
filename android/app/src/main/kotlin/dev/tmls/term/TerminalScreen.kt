@@ -1,6 +1,5 @@
 package dev.tmls.term
 
-import android.graphics.Typeface
 import android.view.ViewGroup
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -73,7 +72,7 @@ fun TerminalScreen(
                     layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                     input.terminalView = this
                     setTerminalViewClient(input)
-                    setTypeface(Typeface.MONOSPACE)
+                    // creates the renderer (monospace); setTypeface before it would hit a null renderer
                     setTextSize(settings.textSizePx.takeIf { it > 0 } ?: TerminalInput.defaultTextSizePx(ctx))
                     isFocusable = true
                     isFocusableInTouchMode = true
