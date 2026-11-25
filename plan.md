@@ -88,10 +88,17 @@ tasks, its exit criteria, and the spec IDs it covers.
 
 Answers risk R1 and R2 before anything is built on top.
 
-- [ ] `tooling/android/binaries/build.sh`: build `openssh` for aarch64 + x86_64 with
+- [x] `tooling/android/binaries/build.sh`: build `openssh` for aarch64 + x86_64 with
       termux-packages at a pinned commit, with our package name/prefix. Try a **static**
       build first (OpenSSL, zlib linked in) so one file = one `lib*.so`. Fallback: ship the
       shared deps as `lib*.so` too, with sonames rewritten by `patchelf`.
+      *Done differently:* not the termux-packages Docker builder but a direct NDK build
+      (Ubuntu container locally, ubuntu-latest in CI) of OpenSSH 10.6p2 with Termux's
+      openssh patches and the versions/checksums termux-packages pins (`VERSIONS`). Static
+      OpenSSL 3.6.5 + zlib, no ldns/libedit/krb5; ssh, scp, ssh-keygen each one file that
+      needs only Android's libc. Two additions: a forced-include `pwd.h` shim so `~` is
+      `$HOME` (so C1 is not needed), and an SSHFP (`VerifyHostKeyDNS`) stub that always
+      fails, since Android lacks the resolver internals. About 10–11 MB per ABI unpacked.
 - [ ] In the spike app: create `$APP/bin/ssh → $nativeLibraryDir/libssh.so`, set `PATH`,
       `HOME=$APP/home`, and check:
   1. `TerminalSession` running `ssh -t alton-desktop tmux attach` shows a working tmux.
@@ -101,7 +108,10 @@ Answers risk R1 and R2 before anything is built on top.
   5. `ssh` reads `$HOME/.ssh/config`. If it reads `getpwuid()`'s home instead (OpenSSH does
      by default), we always pass `-F`, `-o UserKnownHostsFile=` and `-o IdentityFile=`
      explicitly (needs §7 change C1).
-- [ ] Same checks on the emulator (x86_64) for CI.
+- [x] Same checks on the emulator (x86_64) for CI: `SpikeEmulatorTest` against a Docker
+      sshd + tmux test host (`tooling/android/testhost`), key auth. All pass on API 34
+      (run 45697354122, 7a11687). Note: ssh's default user is the app's uid name
+      (`u0_a…`), so every host needs `User` set.
 - **Exit (go):** all five pass on the Fairphone. **No-go:** switch to the fallback in R1 and
   re-plan M3 (in-process ssh behind a `Transport` trait in `core-ffi`).
 
