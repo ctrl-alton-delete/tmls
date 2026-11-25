@@ -1,0 +1,26 @@
+# Pinned at M0 (2026-11-25): current stable releases. Bump deliberately, one PR at a time.
+[versions]
+agp = "9.5.3"
+kotlin = "2.4.21"
+compose-bom = "2026.11.01"
+activity-compose = "1.13.0"
+core-ktx = "1.19.1"
+jna = "5.19.1"
+junit = "4.13.2"
+
+[libraries]
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "core-ktx" }
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activity-compose" }
+compose-bom = { module = "androidx.compose:compose-bom", version.ref = "compose-bom" }
+compose-material3 = { module = "androidx.compose.material3:material3" }
+compose-ui = { module = "androidx.compose.ui:ui" }
+compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
+compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
+# UniFFI's Kotlin bindings call the Rust library through JNA (Android: the @aar artifact)
+jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
+junit = { module = "junit:junit", version.ref = "junit" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+# AGP 9 compiles Kotlin itself (built-in Kotlin); only the Compose compiler plugin is added.
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

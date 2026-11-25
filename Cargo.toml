@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["spikes/s2-core", "spikes/s2-wgpu", "crates/client-core", "crates/desktop"]
+members = ["spikes/s2-core", "spikes/s2-wgpu", "crates/client-core", "crates/core-ffi", "crates/desktop"]
 # GUI crates are built with -p in Docker; a bare cargo build/test stays headless.
 default-members = ["spikes/s2-core", "crates/client-core"]
 

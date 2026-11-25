@@ -1,0 +1,27 @@
+[package]
+name = "core-ffi"
+version = "0.1.0"
+edition.workspace = true
+# The crate links client-core (MIT OR Apache-2.0) and is only used by the Android app (GPLv3);
+# it keeps the workspace licence so it can be shared like client-core.
+license.workspace = true
+description = "tmls for Android: Kotlin API over client-core (UniFFI)"
+publish = false
+
+[lib]
+# cdylib: libcore_ffi.so for Android; lib: for `cargo test` and the bindgen binary
+crate-type = ["cdylib", "lib"]
+name = "core_ffi"
+
+[[bin]]
+# Generates the Kotlin bindings from a built library (`--library`); a host tool, never in the APK.
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+client-core = { path = "../client-core" }
+uniffi = "0.32"
