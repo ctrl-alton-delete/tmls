@@ -1,6 +1,6 @@
 # tmls for Android — Specification
 
-Status: draft 1 (2026-11-25). Fork: `ctrl-alton-delete/tmls`, branch `android`. Upstream:
+Status: draft 2 (2026-11-25; phone-as-host decided: HOST-7, CONF-1, NF-7). Fork: `ctrl-alton-delete/tmls`, branch `android`. Upstream:
 `sagunkayastha/tmls` (Rust desktop app, MIT OR Apache-2.0). Companion: [plan.md](plan.md).
 
 This document says **what** the Android app does and why. `plan.md` says how and in what order.
@@ -169,10 +169,20 @@ Priority: **P0** = needed for the first usable build (M2–M5), **P1** = v1.0, *
 - **HOST-6 (P0)** Shared connections: ControlMaster sockets in `$APP/run/cm-%C`, with
   `ControlPersist` so the list, push tails and attaches share one TCP connection per host. They are closed
   when the service stops.
-- **HOST-7 (P0)** **The phone as a host.** A built-in host entry "this phone" points at
-  `127.0.0.1` on a configurable port (z2term's `sshd`, or Termux's 8022). The setup screen
-  explains the one-time steps (start sshd, add the app's public key). It is listed first, named
-  by the `name` file (default: the device model).
+- **HOST-7 (P0)** **The phone as a host.** The phone is an ordinary ssh host: an alias in
+  `hosts` (default `phone`) that `~/.ssh/config` maps to `127.0.0.1` on a configurable port
+  (z2term's `sshd`, or Termux's 8022). Every command for it goes through `client-core`'s ssh
+  path, like any other host. `android.json` names that alias as `phone_host` (default `phone`)
+  with an optional display `label` (default: the device model); the UI lists it first as
+  "this phone" and shows the setup help when it is offline. The setup screen explains the
+  one-time steps (start sshd, add the app's public key).
+  - `client-core` treats the host whose name equals its local name as "this machine" and runs
+    tmux there without ssh. The app has no tmux, so it uses a reserved local name, `tmls-app`,
+    that is never a host: `core-ffi` writes it to the app-owned `name` file before
+    `Config::load` (CONF-1). As the app's `PATH` has no `tmux`, `Config::load` never lists the
+    local machine, and the desktop's "not in tmux" (kitty) section does not exist in the app.
+  - The host editor rejects `localhost` (Android's hostname, which `Config::load` drops from
+    `hosts`), the reserved name `tmls-app`, and names starting with `-`.
 - **HOST-8 (P1)** Network changes (Wi-Fi ↔ mobile, VPN reconnect) trigger an immediate refresh
   of every host and a reattach of dropped tabs (`ConnectivityManager` callbacks).
 - **HOST-9 (P2)** mosh for tabs (`mosh HOST -- tmux attach …`) as a per-host option.
@@ -331,7 +341,11 @@ All of this already exists in `client-core`. The Android work is wiring and UI.
 
 - **CONF-1 (P0)** Same files and formats as the desktop under `$HOME/.config/tmls/`: `hosts`,
   `name`, `host-colors.json`, `agent-presets.json`, `prompts`, `notifications.json`, `pins`,
-  `top`, `top.json`. A config from the desktop can be copied over as-is.
+  `top`, `top.json`. A config from the desktop can be copied over as-is, **except `name`**:
+  it is app-owned and always holds the reserved local name `tmls-app` (HOST-7). Config import
+  (CONF-4) and copying a desktop config skip or overwrite it; were the desktop's `name`
+  (e.g. `alton-desktop`) kept, `Config::load` would drop that host from the list and take it
+  for this machine.
 - **CONF-2 (P0)** Android-only settings live in a new file `android.json` in the same
   directory (extra-keys layouts, agent layers, poll periods, font, theme, IME mode), so
   all config is files that can be backed up and diffed.
@@ -367,8 +381,11 @@ All of this already exists in `client-core`. The Android work is wiring and UI.
   process loses tabs but no sessions; reopening restores the list of tabs from disk and reattaches.
 - **NF-6 Accessibility.** Status marks are also announced as words (TalkBack labels); colour is
   never the only signal.
-- **NF-7 Compatibility with desktop tmls.** Same config files, same pins slugs, same hooks
-  events file. A host set up for desktop tmls needs nothing extra for the app.
+- **NF-7 Compatibility with desktop tmls.** Same config files (except `name`, CONF-1), same
+  pins slug format, same hooks events file. A host set up for desktop tmls needs nothing extra
+  for the app. Caveat on pins: the desktop slugs its own sessions with host `local`
+  (`tmls_slug`), while the app sees them under the host's name (e.g. `alton-desktop`), so pins
+  the desktop made for its own sessions do not carry over; pins of its remote hosts' sessions do.
 
 ## 8. Acceptance criteria (v1.0)
 

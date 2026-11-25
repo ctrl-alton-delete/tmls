@@ -1,6 +1,6 @@
 # tmls for Android — Development plan
 
-Status: draft 1 (2026-11-25). Companion to [spec.md](spec.md); requirement IDs (`KB-1`, `AG-5`, …)
+Status: draft 2 (2026-11-25; C4 added, HOST-7 tasks in M3). Companion to [spec.md](spec.md); requirement IDs (`KB-1`, `AG-5`, …)
 refer to it. Milestones are in order; each ends with something that runs on the phone.
 
 ---
@@ -144,7 +144,9 @@ The first build Alton can use daily: one tab per host session, good keys. No Rus
 - [ ] Tabs from the list (TERM-2); tab strip with status marks; restore open tabs on restart (NF-5).
 - [ ] Automatic reattach with backoff + network callbacks (TERM-3, HOST-8).
 - [ ] Pins (shared slug format) and `top` ordering (LIST-3).
-- [ ] Phone as a host (HOST-7): setup screen for z2term/Termux sshd on localhost.
+- [ ] Phone as a host (HOST-7): `core-ffi` writes `name` = `tmls-app` before `Config::load`;
+      `phone_host` / label in `android.json`; host editor validation; setup screen for
+      z2term/Termux sshd on localhost.
 - **Exit:** scenario S1 and S5 work; three hosts (desktop, cachyos, phone) in one list.
 
 ### M4 — Agent status, notifications, background service (5–7 days)
@@ -268,6 +270,9 @@ text-mode vs char-mode setting behaves as documented.
     `links.rs`, the message queue from `queue.rs`, alert rules from `alerts.rs`) into `client-core`,
     so both front ends share it. Only if the code is cleanly separable; otherwise port to Kotlin
     and keep the desktop's tests as the reference cases.
+  - **C4 (optional)** Let `Config::load` be told there is no local machine (e.g. an option
+    instead of the `name` file), so the app need not rely on a reserved `name` and on `tmux`
+    being absent from its `PATH` (HOST-7). Not needed for v1; offer upstream when convenient.
 - Everything Android-specific stays in `crates/core-ffi`, `android/` and `tooling/android/`.
 
 ## 8. Definition of done (per task)
