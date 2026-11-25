@@ -141,8 +141,14 @@ class SpikeChecks(private val tools: BundledTools) {
         val again = runCatching { coreRun(sshArgv(host, "true"), 15_000u) }
         val ms = (System.nanoTime() - started) / 1_000_000
         val ok = sockets.any { it.startsWith("cm-") } && check.isSuccess && again.isSuccess
+        // a time only means something when the second command really went through a master
+        val second = when {
+            again.isFailure -> "second command failed: ${again.exceptionOrNull()?.message}"
+            check.isSuccess -> "second command through the master: $ms ms"
+            else -> "second command ran without a master: $ms ms"
+        }
         Check("3", "ControlMaster shared connection", if (ok) Outcome.PASS else Outcome.FAIL,
-            "sockets in ${tools.controlDir}: $sockets\nssh -O check: ${check.exceptionOrNull()?.message ?: "master running"}\nsecond command through the master: ${ms} ms")
+            "sockets in ${tools.controlDir}: $sockets\nssh -O check: ${check.exceptionOrNull()?.message ?: "master running"}\n$second")
     }
 
     private fun auth(host: String): Check = guarded("4", "Authentication and name resolution") {
@@ -244,7 +250,7 @@ class SpikeChecks(private val tools: BundledTools) {
             append("# ~/.ssh/config of tmls (M1 spike). Edit freely; Save writes it.\n")
             append("# The probe host only exists to check that ssh reads this file (check 5).\n")
             append("Host $PROBE_HOST\n  HostName 192.0.2.1\n  Port $PROBE_PORT\n\n")
-            if (host.isNotBlank()) append("Host $host\n  User $user\n\n")
+            if (host.isNotBlank()) append("Host $host\n  User $user\n  # HostName: the MagicDNS name (e.g. box.tailnet-name.ts.net) or 100.x.y.z address,\n  # if \"$host\" is only an alias\n  #HostName \n\n")
             append("Host *\n  StrictHostKeyChecking accept-new\n")
         }
 
