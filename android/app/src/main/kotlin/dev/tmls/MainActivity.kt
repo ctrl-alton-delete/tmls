@@ -1,4 +1,4 @@
-package io.github.ctrl_alton_delete.tmls
+package dev.tmls
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -16,8 +16,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import io.github.ctrl_alton_delete.tmls.core.agentRules
-import io.github.ctrl_alton_delete.tmls.core.version
+import dev.tmls.core.agentRules
+import dev.tmls.core.version
 
 /** M0: proves the app reaches the Rust core. Replaced by the session list in M3. */
 class MainActivity : ComponentActivity() {

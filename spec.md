@@ -1,6 +1,6 @@
 # tmls for Android — Specification
 
-Status: draft 2 (2026-11-25; phone-as-host decided: HOST-7, CONF-1, NF-7). Fork: `ctrl-alton-delete/tmls`, branch `android`. Upstream:
+Status: draft 3 (2026-11-25; phone-as-host decided: HOST-7, CONF-1, NF-7; package `dev.tmls`, Q5). Fork: `ctrl-alton-delete/tmls`, branch `android`. Upstream:
 `sagunkayastha/tmls` (Rust desktop app, MIT OR Apache-2.0). Companion: [plan.md](plan.md).
 
 This document says **what** the Android app does and why. `plan.md` says how and in what order.
@@ -142,9 +142,14 @@ Decisions:
   `MonitorService` (foreground service type `dataSync`; `specialUse` if `dataSync` time limits
   bite on Android 15+) so alerts keep working with the app in the background. Terminal sessions
   are owned by the same service so tabs survive the Activity being destroyed.
-- **ARCH-6 — Files.** App-private storage only: `$APP/home/.ssh/` (config, keys,
+- **ARCH-6 — Files.** `$APP` is the app's files directory (`Context.getFilesDir()`,
+  `/data/user/<user>/dev.tmls/files`). App-private storage only: `$APP/home/.ssh/` (config, keys,
   known_hosts, ControlMaster sockets in `$APP/run/`), `$APP/home/.config/tmls/` (tmls's own
   config files, same formats as the desktop). Nothing in shared storage.
+  The ControlMaster directory must be at most 46 bytes (`tmux::control_dir`: ssh binds
+  `DIR/cm-` + 40 characters of `%C` + 17 more into a 107-byte Unix socket path).
+  `/data/user/0/dev.tmls/files/run` is 31 bytes; the worst case, a secondary user with a
+  `.debug` suffix (`/data/user/10/dev.tmls.debug/files/run`), is 38.
 
 ## 6. Functional requirements
 
@@ -413,6 +418,7 @@ v1.0 is done when, on the Fairphone, with `alton-desktop`, `alton-cachyos` and t
   for side-loaded apps). Decide in M4.
 - **Q4** herdr as a second backend next to tmux (herdr already lists sessions per machine and
   marks agent state; Collie talks to it). Worth it after v1 if Alton moves to herdr on the desktop.
-- **Q5** Package name and app name. Working values: `io.github.ctrl_alton_delete.tmls`, "tmls".
+- **Q5** *Decided (2026-11-25):* package name (applicationId and namespace) `dev.tmls`, app name
+  "tmls". Short on purpose, so the ControlMaster directory fits the socket-path limit (ARCH-6).
 - **Q6** Expose phone features to sessions (notifications, clipboard, share), as z2term's
   `z2-*` and Termux:API do? Out of scope for v1; z2term already covers the on-phone case.

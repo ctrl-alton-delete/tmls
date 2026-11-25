@@ -1,4 +1,4 @@
-package io.github.ctrl_alton_delete.tmls
+package dev.tmls
 
 import org.junit.Assert.assertEquals
 import org.junit.Test

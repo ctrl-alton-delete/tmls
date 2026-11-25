@@ -93,14 +93,14 @@ val uniffiBindings = tasks.register<UniffiBindingsTask>("uniffiBindings") {
 }
 
 android {
-    namespace = "io.github.ctrl_alton_delete.tmls"
+    namespace = "dev.tmls"
     // AndroidX of Nov 2026 needs 37.1+; minor API levels need the block form.
     compileSdk {
         version = release(37) { minorApiLevel = 2 }
     }
 
     defaultConfig {
-        applicationId = "io.github.ctrl_alton_delete.tmls"
+        applicationId = "dev.tmls"
         minSdk = 29
         targetSdk = 36
         versionCode = 1
