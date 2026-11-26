@@ -33,7 +33,7 @@ import java.io.File
 class AppFlowTest {
     private val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as TmlsApp
     private val compose = createEmptyComposeRule()
-    private val session = "flow-${System.currentTimeMillis() % 100000}"
+    private val session = "af${System.currentTimeMillis() % 10000}" // short: tmux cuts status-left at 10
 
     @get:Rule
     val rules: RuleChain = RuleChain
