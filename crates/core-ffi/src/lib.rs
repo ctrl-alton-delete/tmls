@@ -112,10 +112,12 @@ pub fn session_name_problem(name: String) -> Option<String> {
 }
 
 /// The argv that prints `host`'s tmux prefix key (`C-b` unless the host's tmux sets another),
-/// for the extra-keys row's PREFIX key (spec KB-1).
+/// for the extra-keys row's PREFIX key (spec KB-1). It asks the running server and fails when
+/// there is none: starting one here (`start-server`) races the tab's own `new-session`, and the
+/// tab can attach to a server that is exiting for want of sessions ("server exited unexpectedly").
 #[uniffi::export]
 pub fn prefix_argv(host: String) -> Vec<String> {
-    ssh_argv(host, "tmux start-server \\; show-options -gv prefix".to_string())
+    ssh_argv(host, "tmux show-options -gv prefix".to_string())
 }
 
 /// One word for a POSIX shell: as it is when it only has safe characters, else in single quotes.

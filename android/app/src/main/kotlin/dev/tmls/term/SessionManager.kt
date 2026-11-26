@@ -130,12 +130,22 @@ class SessionManager(
         return session
     }
 
-    /** KB-1: asks the host's tmux for its prefix, off the main thread; keeps C-b on failure. */
+    /**
+     * KB-1: asks the host's tmux for its prefix, off the main thread; keeps C-b on failure. The
+     * query needs a running server and does not start one (see `prefix_argv`), so it waits for
+     * the tab's own `new-session` and retries a few times.
+     */
     private fun readPrefix(tab: Tab) {
         background.execute {
-            runCatching { run(prefixArgv(tab.host), 15_000u) }
-                .onSuccess { out -> prefixBytes(out.trim())?.let { tab.prefix = it } }
-                .onFailure { Log.i(TAG, "prefix of ${tab.host}: ${it.message}") }
+            repeat(PREFIX_TRIES) { attempt ->
+                Thread.sleep(PREFIX_WAIT_MS)
+                if (tab !in tabs) return@execute
+                val out = runCatching { run(prefixArgv(tab.host), 15_000u) }
+                    .onFailure { Log.i(TAG, "prefix of ${tab.host} (try ${attempt + 1}): ${it.message}") }
+                    .getOrNull() ?: return@repeat
+                prefixBytes(out.trim())?.let { tab.prefix = it }
+                return@execute
+            }
         }
     }
 
@@ -185,6 +195,8 @@ class SessionManager(
         const val TRANSCRIPT_ROWS = 2000
         private const val HISTORY = 30
         private const val ENTER_DELAY_MS = 120L
+        private const val PREFIX_TRIES = 5
+        private const val PREFIX_WAIT_MS = 2_000L
 
         /** What the bar over an ended tab says (TERM-3; SEC-5 for a changed host key). */
         fun describeEnd(exitStatus: Int, transcript: String): Ended = when {
